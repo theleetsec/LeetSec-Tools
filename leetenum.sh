@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # ============================================================
-# LeetEnum v3.3 // Property of LeetSec
-# The Recon Standard (Logic Fixes & Interactive Flow)
+# LeetEnum v1.0 // Property of LeetSec
 # Features: Robust Config, Interactive Questions, Stability
 # ============================================================
 
@@ -30,7 +29,7 @@ banner() {
                                                   
 EOF
     echo -e "${NC}"
-    echo -e "${C}::: LeetSec Reconnaissance Engine v3.3 :::${NC}\n"
+    echo -e "${C}::: LeetSec Reconnaissance Engine v1.0 :::${NC}\n"
 }
 
 die() { echo -e "${R}[FATAL] $1${NC}"; exit 1; }
@@ -145,7 +144,7 @@ init_conf() {
                     ;;
             esac
             source "$CONF_FILE"
-            notify "🔔 LeetEnum Configured."
+            notify "LeetEnum Configured."
         else
             echo "NOTIFY_SERVICE=\"None\"" >> "$CONF_FILE"
         fi
@@ -160,7 +159,7 @@ setup_cron() {
             D=$(gum input --placeholder "Run every X days? (e.g. 7)")
             if [[ "$D" =~ ^[0-9]+$ ]]; then
                 (crontab -l 2>/dev/null; echo "0 0 */$D * * $SCRIPT_PATH -d $TGT -m -no-tmux >> ${HOME}/leetsec_cron.log 2>&1") | crontab -
-                notify "📅 $TGT monitored every $D days."
+                notify "$TGT monitored every $D days."
             fi
         fi
     fi
@@ -268,7 +267,7 @@ WL_RES="${WORK_DIR}/resolvers.txt"
 [ ! -s "$WL_PERM" ] && wget -q https://raw.githubusercontent.com/m4ll0k/BBTz/master/perm_words.txt -O "$HOME/perm_words.txt"
 wget -q https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt -O "$WL_RES"
 
-notify "🚀 LeetEnum Started: $TARGET [$PROF]"
+notify "LeetEnum Started: $TARGET [$PROF]"
 
 # 1. PASSIVE
 if [ ! -f "$LOCK_DIR/p1" ]; then
@@ -352,7 +351,7 @@ if [ "$MONITOR" = true ] && [ -f "$LAST_MASTER" ]; then
     sort $SORT -u "$WORK_DIR/master.txt" > "$WORK_DIR/new.txt"
     comm -13 "$WORK_DIR/old.txt" "$WORK_DIR/new.txt" > "$FINAL_DIR/new_subs.txt"
     NEW_CNT=$(wc -l < "$FINAL_DIR/new_subs.txt")
-    [ "$NEW_CNT" -gt 0 ] && notify "🚨 MONITOR: Found $NEW_CNT NEW subdomains!"
+    [ "$NEW_CNT" -gt 0 ] && notify "MONITOR: Found $NEW_CNT NEW subdomains!"
 fi
 
 # 5. PORTS
