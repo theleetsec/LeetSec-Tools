@@ -2,7 +2,6 @@
 
 # ============================================================
 # LeetEnum v1.0 // Property of LeetSec
-# Features: Robust Config, Interactive Questions, Stability
 # ============================================================
 
 # --- CORE ---
@@ -39,24 +38,24 @@ good() { echo -e "${G}[+] $1${NC}"; }
 
 # Cleanup
 cleanup() {
-    echo -e "\n${R}[!] Abort signal received. Cleaning up...${NC}"
-    kill $(jobs -p) 2>/dev/null
-    pkill -P $$ 2>/dev/null
-    exit 1
+    # Don't print cleanup msg if we finished successfully
+    exit 0
 }
 trap cleanup SIGINT SIGTERM
 
-# Alerts
+# Alerts (Synchronous - Guarantees Delivery)
 notify() {
     msg="$1"
+    # Force reload config to ensure we have keys
     [ -f "$CONF_FILE" ] && source "$CONF_FILE"
     
     if [ "$NOTIFY_SERVICE" == "Discord" ] && [ -n "$DISCORD_WEBHOOK" ]; then
-        curl -s -H "Content-Type: application/json" -d "{\"content\": \"$msg\"}" "$DISCORD_WEBHOOK" > /dev/null &
+        curl -s -H "Content-Type: application/json" -d "{\"content\": \"$msg\"}" "$DISCORD_WEBHOOK" > /dev/null
     elif [ "$NOTIFY_SERVICE" == "Slack" ] && [ -n "$SLACK_WEBHOOK" ]; then
-        curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$msg\"}" "$SLACK_WEBHOOK" > /dev/null &
+        curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$msg\"}" "$SLACK_WEBHOOK" > /dev/null
     elif [ "$NOTIFY_SERVICE" == "Telegram" ] && [ -n "$TELEGRAM_TOKEN" ]; then
-        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHATID" -d text="$msg" > /dev/null &
+        # Removed '&' to ensure script waits for telegram API response before exiting
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHATID" -d text="$msg" > /dev/null
     fi
 }
 
@@ -65,34 +64,23 @@ check_gear() {
     mkdir -p "$CONF_DIR"
     ! ping -c 1 8.8.8.8 &>/dev/null && die "Network unreachable."
 
+    # System Deps
     MISSING_DEPS=false
-    
     if ! command -v massdns &>/dev/null; then
-        echo -e "${R}[!] MassDNS is missing.${NC}"
-        echo -e "${Y}    -> Run: sudo apt update && sudo apt install massdns${NC}"
-        MISSING_DEPS=true
+        echo -e "${R}[!] MassDNS missing.${NC}"; echo -e "${Y}    -> Run: sudo apt update && sudo apt install massdns${NC}"; MISSING_DEPS=true
     fi
-
     if ! command -v chromium &>/dev/null && ! command -v google-chrome &>/dev/null; then
-        echo -e "${R}[!] Chromium is missing (Required for Screenshots).${NC}"
-        echo -e "${Y}    -> Run: sudo apt install chromium-browser${NC}"
-        MISSING_DEPS=true
+        echo -e "${R}[!] Chromium missing.${NC}"; echo -e "${Y}    -> Run: sudo apt install chromium-browser${NC}"; MISSING_DEPS=true
     fi
-    
-    if [ "$MISSING_DEPS" = true ]; then
-        die "Please install the missing system dependencies above and restart."
-    fi
+    [ "$MISSING_DEPS" = true ] && die "Install dependencies manually."
 
+    # Go Tools
     for t in tmux pv go amass subfinder puredns httpx naabu katana nuclei waybackurls anew jq gum ffuf gowitness; do
         if ! command -v $t &>/dev/null; then
             info "Installing $t..."
-            if [ "$t" == "gum" ]; then
-                go install github.com/charmbracelet/gum@latest >/dev/null 2>&1
-            elif [ "$t" == "gowitness" ]; then
-                go install github.com/sensepost/gowitness@latest >/dev/null 2>&1
-            elif [[ "$t" =~ ^(tmux|pv|jq)$ ]]; then
-                warn "Missing system tool: $t. Try 'sudo apt install $t' if this fails."
-            else
+            if [ "$t" == "gum" ]; then go install github.com/charmbracelet/gum@latest >/dev/null 2>&1
+            elif [ "$t" == "gowitness" ]; then go install github.com/sensepost/gowitness@latest >/dev/null 2>&1
+            elif [[ "$t" =~ ^(tmux|pv|jq)$ ]]; then warn "Missing $t. Try 'sudo apt install $t'"; else
                 go install -v "github.com/projectdiscovery/$t/v2/cmd/$t@latest" >/dev/null 2>&1 || \
                 go install -v "github.com/tomnomnom/$t@latest" >/dev/null 2>&1
             fi
@@ -107,44 +95,27 @@ check_gear() {
     fi
 }
 
-# --- ROBUST CONFIG LOADER ---
 init_conf() {
-    # 1. Reset Flag Handling
-    if [ "$RESET" = true ]; then
-        rm -f "$CONF_FILE"
-        warn "Configuration reset initiated."
-    fi
-
-    # 2. Ensure Config Exists
+    [ "$RESET" = true ] && rm -f "$CONF_FILE" && warn "Config reset."
     if [ ! -f "$CONF_FILE" ]; then touch "$CONF_FILE"; fi
-
-    # 3. Load & Check Variables
     source "$CONF_FILE"
-
-    # 4. Force Setup if variable missing (The Fix)
+    
+    # If variable is missing, force setup
     if [ -z "$NOTIFY_SERVICE" ]; then
-        if gum confirm "Configure Notification Alerts?"; then
+        if gum confirm "Configure Alerts?"; then
             SVC=$(gum choose "Discord" "Slack" "Telegram")
             echo "NOTIFY_SERVICE=\"$SVC\"" >> "$CONF_FILE"
-            
             case $SVC in
-                Discord)
-                    VAL=$(gum input --placeholder "Webhook URL" --password)
-                    echo "DISCORD_WEBHOOK=\"$VAL\"" >> "$CONF_FILE"
-                    ;;
-                Slack)
-                    VAL=$(gum input --placeholder "Webhook URL" --password)
-                    echo "SLACK_WEBHOOK=\"$VAL\"" >> "$CONF_FILE"
-                    ;;
-                Telegram)
-                    TOK=$(gum input --placeholder "Bot Token" --password)
-                    ID=$(gum input --placeholder "Chat ID")
-                    echo "TELEGRAM_TOKEN=\"$TOK\"" >> "$CONF_FILE"
-                    echo "TELEGRAM_CHATID=\"$ID\"" >> "$CONF_FILE"
-                    ;;
+                Discord)  VAL=$(gum input --placeholder "Webhook URL" --password); echo "DISCORD_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
+                Slack)    VAL=$(gum input --placeholder "Webhook URL" --password); echo "SLACK_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
+                Telegram) 
+                    TOK=$(gum input --placeholder "Bot Token" --password); echo "TELEGRAM_TOKEN=\"$TOK\"" >> "$CONF_FILE"; 
+                    ID=$(gum input --placeholder "Chat ID"); echo "TELEGRAM_CHATID=\"$ID\"" >> "$CONF_FILE" ;;
             esac
+            # Reload and Test immediately
             source "$CONF_FILE"
-            notify "LeetEnum Configured."
+            notify "LeetEnum Configured. If you see this, it works!"
+            good "Test notification sent."
         else
             echo "NOTIFY_SERVICE=\"None\"" >> "$CONF_FILE"
         fi
@@ -153,10 +124,9 @@ init_conf() {
 
 setup_cron() {
     TGT=$1
-    # Check if job already exists
     if [ -z "$(crontab -l 2>/dev/null | grep "$SCRIPT_PATH" | grep "$TGT")" ]; then
-        if gum confirm "Schedule automatic monitoring for $TGT?"; then
-            D=$(gum input --placeholder "Run every X days? (e.g. 7)")
+        if gum confirm "Add to Auto-Scheduler?"; then
+            D=$(gum input --placeholder "Days interval (e.g. 7)")
             if [[ "$D" =~ ^[0-9]+$ ]]; then
                 (crontab -l 2>/dev/null; echo "0 0 */$D * * $SCRIPT_PATH -d $TGT -m -no-tmux >> ${HOME}/leetsec_cron.log 2>&1") | crontab -
                 notify "$TGT monitored every $D days."
@@ -165,7 +135,7 @@ setup_cron() {
     fi
 }
 
-# --- CLI & INTERACTIVE ARGS ---
+# --- CLI ARGS ---
 RESET=false; TARGET=""; MONITOR=false; NO_TMUX=false; DEEP_SCAN=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -183,32 +153,20 @@ done
 check_gear
 init_conf
 
+# --- WIZARD ---
 if [ -z "$TARGET" ]; then
     banner
-    TARGET=$(gum input --placeholder "Enter Target Domain (e.g. tesla.com)")
+    TARGET=$(gum input --placeholder "Target Domain")
+    if gum confirm "Enable Deep Port Scan (Slow)?"; then DEEP_SCAN=true; fi
+    if gum confirm "Differential Mode (Monitor)?"; then MONITOR=true; fi
 fi
 
 [ -z "$TARGET" ] && die "Target required."
 TARGET=$(echo "$TARGET" | sed 's~http[s]*://~~g' | tr -d '/')
 
-# Interactive Questions (Run if not inside Tmux/Cron and flags not set)
-# This ensures users get asked even if they provided -d domain
+# --- SESSION GUARDIAN ---
 if [ -t 0 ] && [ "$NO_TMUX" = false ]; then
-    
-    # Ask for Monitor Mode if not set
-    if [ "$MONITOR" = false ]; then
-        if gum confirm "Enable Monitor Mode (Find New Subdomains)?"; then MONITOR=true; fi
-    fi
-    
-    # Ask for Deep Scan if not set
-    if [ "$DEEP_SCAN" = false ]; then
-        if gum confirm "Enable Deep Port Scan (1-10k Ports)?"; then DEEP_SCAN=true; fi
-    fi
-
-    # Ask for Cron
     setup_cron "$TARGET"
-
-    # Ask for Tmux (Last)
     SESS="leet_${TARGET//./_}"
     if [ -z "$TMUX" ]; then
         if tmux has-session -t "$SESS" 2>/dev/null; then
@@ -225,7 +183,6 @@ fi
 TS=$(date +%Y%m%d_%H%M)
 BASE_DIR="$(pwd)/recon_${TARGET}"
 LAST_MASTER=""
-
 [ -L "${BASE_DIR}/latest" ] && LAST_MASTER=$(readlink -f "${BASE_DIR}/latest/master_dns.txt")
 
 if [ "$MONITOR" = true ]; then
@@ -233,12 +190,7 @@ if [ "$MONITOR" = true ]; then
     info "Mode: MONITOR"
 else
     LAST_SCAN=$(ls -dt "$BASE_DIR"/*/ 2>/dev/null | head -1)
-    if [ -n "$LAST_SCAN" ]; then 
-        FINAL_DIR=${LAST_SCAN%/}
-        info "Resuming session."
-    else 
-        FINAL_DIR="${BASE_DIR}/${TS}"
-    fi
+    if [ -n "$LAST_SCAN" ]; then FINAL_DIR=${LAST_SCAN%/}; info "Resuming session."; else FINAL_DIR="${BASE_DIR}/${TS}"; fi
 fi
 
 WORK_DIR="/dev/shm/recon_${TARGET}_${TS}"
@@ -262,7 +214,6 @@ JOB_LIMIT=$((LIMIT / PARALLEL))
 WL_BRUTE=~/brute_wordlist.txt
 WL_PERM=~/perm_words.txt
 WL_RES="${WORK_DIR}/resolvers.txt"
-
 [ ! -s "$WL_BRUTE" ] && wget -q https://wordlists-cdn.assetnote.io/data/manual/best-dns-wordlist.txt -O "$WL_BRUTE"
 [ ! -s "$WL_PERM" ] && wget -q https://raw.githubusercontent.com/m4ll0k/BBTz/master/perm_words.txt -O "$HOME/perm_words.txt"
 wget -q https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt -O "$WL_RES"
@@ -364,10 +315,17 @@ if [ -s "$WORK_DIR/master.txt" ]; then
     
     httpx -l "$T_LIST" -threads "$HTTPX" -random-agent -retries 2 -timeout 10 -sc -title -tech-detect -ip -cname -server -o "$FINAL_DIR/http_full.txt" -silent > /dev/null 2>&1
     
-    # SORTING
+    # SORTING - SEPARATE FILES
     awk '{print $1}' "$FINAL_DIR/http_full.txt" | sort $SORT -u > "$WORK_DIR/live.txt"
     grep "\[200\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/200.txt"
+    grep "\[301\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/301.txt"
+    grep "\[302\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/302.txt"
+    grep "\[401\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/401.txt"
     grep "\[403\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/403.txt"
+    grep "\[404\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/404.txt"
+    grep "\[500\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/500.txt"
+    
+    # Clean Live List for Fuzzing
     cp "$WORK_DIR/live.txt" "$FINAL_DIR/live_urls.txt"
 fi
 
@@ -377,7 +335,8 @@ if [ -s "$WORK_DIR/live.txt" ]; then
     if command -v gowitness &>/dev/null; then
         echo -e "${C}    -> Taking Screenshots...${NC}"
         mkdir -p "$FINAL_DIR/screenshots"
-        gowitness scan file -f "$WORK_DIR/live.txt" -s "$FINAL_DIR/screenshots/" --threads 10 --no-http --chrome-arg='--no-sandbox' --chrome-arg='--disable-gpu' > "$RPT_DIR/gowitness.log" 2>&1
+        # FIXED: Removed --chrome-arg flags entirely to fix compatibility
+        gowitness scan file -f "$WORK_DIR/live.txt" -s "$FINAL_DIR/screenshots/" --threads 10 --no-http > "$RPT_DIR/gowitness.log" 2>&1
     fi
 fi
 
@@ -422,6 +381,7 @@ cat << EOF > "$FINAL_DIR/REPORT.md"
 ## Status Codes
 - 200 OK: $(wc -l < "$FINAL_DIR/200.txt")
 - 403 Forbidden: $(wc -l < "$FINAL_DIR/403.txt")
+- 404 Not Found: $(wc -l < "$FINAL_DIR/404.txt")
 
 [View Data]($FINAL_DIR)
 EOF
