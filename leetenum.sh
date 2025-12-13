@@ -7,6 +7,9 @@
 # --- CORE ---
 export LC_ALL=C
 export TERM=xterm-256color
+# CRITICAL FIX: Add Go Bin path immediately so script can see installed tools
+export PATH=$PATH:$HOME/go/bin:/usr/local/go/bin
+
 CONF_DIR="$HOME/.config/leetsec"
 CONF_FILE="$CONF_DIR/leetenum.conf"
 SCRIPT_PATH=$(realpath "$0")
@@ -15,22 +18,15 @@ SCRIPT_PATH=$(realpath "$0")
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'; C='\033[0;36m'; NC='\033[0m'
 
 # --- UI ---
-
 banner() {
     clear
     echo -e "${G}"
     cat << "EOF"
-    
- ██▓    ▓█████ ▓█████▄▄▄█████▓▓█████  ███▄    █  █    ██  ███▄ ▄███▓
-▓██▒    ▓█   ▀ ▓█   ▀▓  ██▒ ▓▒▓█   ▀  ██ ▀█   █  ██  ▓██▒▓██▒▀█▀ ██▒
-▒██░    ▒███   ▒███  ▒ ▓██░ ▒░▒███   ▓██  ▀█ ██▒▓██  ▒██░▓██    ▓██░
-▒██░    ▒▓█  ▄ ▒▓█  ▄░ ▓██▓ ░ ▒▓█  ▄ ▓██▒  ▐▌██▒▓▓█  ░██░▒██    ▒██ 
-░██████▒░▒████▒░▒████▒ ▒██▒ ░ ░▒████▒▒██░   ▓██░▒▒█████▓ ▒██▒   ░██▒
-░ ▒░▓  ░░░ ▒░ ░░░ ▒░ ░ ▒ ░░   ░░ ▒░ ░░ ▒░   ▒ ▒ ░▒▓▒ ▒ ▒ ░ ▒░   ░  ░
-░ ░ ▒  ░ ░ ░  ░ ░ ░  ░   ░     ░ ░  ░░ ░░   ░ ▒░░░▒░ ░ ░ ░  ░      ░
-  ░ ░      ░      ░    ░         ░      ░   ░ ░  ░░░ ░ ░ ░      ░   
-    ░  ░   ░  ░   ░  ░           ░  ░         ░    ░            ░   
-                                                                    
+    __               __  ______                     
+   / /   ___  ___  / /_/ ____/___  __  ______ ___ 
+  / /   / _ \/ _ \/ __/ __/ / __ \/ / / / __ `__ \
+ / /___/  __/  __/ /_/ /___/ / / / /_/ / / / / / /
+/_____/\___/\___/\__/_____/_/ /_/\__,_/_/ /_/ /_/ 
                                                   
 EOF
     echo -e "${NC}"
@@ -44,15 +40,13 @@ good() { echo -e "${G}[+] $1${NC}"; }
 
 # Cleanup
 cleanup() {
-    # Don't print cleanup msg if we finished successfully
     exit 0
 }
 trap cleanup SIGINT SIGTERM
 
-# Alerts (Synchronous - Guarantees Delivery)
+# Alerts
 notify() {
     msg="$1"
-    # Force reload config to ensure we have keys
     [ -f "$CONF_FILE" ] && source "$CONF_FILE"
     
     if [ "$NOTIFY_SERVICE" == "Discord" ] && [ -n "$DISCORD_WEBHOOK" ]; then
@@ -60,68 +54,128 @@ notify() {
     elif [ "$NOTIFY_SERVICE" == "Slack" ] && [ -n "$SLACK_WEBHOOK" ]; then
         curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$msg\"}" "$SLACK_WEBHOOK" > /dev/null
     elif [ "$NOTIFY_SERVICE" == "Telegram" ] && [ -n "$TELEGRAM_TOKEN" ]; then
-        # Removed '&' to ensure script waits for telegram API response before exiting
         curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHATID" -d text="$msg" > /dev/null
     fi
 }
 
-# Integrity Check
+# --- ROBUST DEPENDENCY MANAGER ---
 check_gear() {
     mkdir -p "$CONF_DIR"
-    ! ping -c 1 8.8.8.8 &>/dev/null && die "Network unreachable."
+    ! ping -c 1 8.8.8.8 &>/dev/null && die "Network unreachable. Check your internet."
 
-    # System Deps
+    # 1. CORE DEPENDENCIES (Must exist first)
+    # Check for Go first because we need it for everything else
+    if ! command -v go &>/dev/null; then
+        warn "Golang not found. Attempting to install..."
+        if command -v apt &>/dev/null; then
+            sudo apt update && sudo apt install -y golang-go
+        elif command -v pacman &>/dev/null; then
+             sudo pacman -S go
+        fi
+        
+        # Check again
+        if ! command -v go &>/dev/null; then
+            die "Could not install Golang automatically. Please install Go manually: https://go.dev/doc/install"
+        fi
+    fi
+
+    # 2. SYSTEM TOOLS (APT)
     MISSING_DEPS=false
-    if ! command -v massdns &>/dev/null; then
-        echo -e "${R}[!] MassDNS missing.${NC}"; echo -e "${Y}    -> Run: sudo apt update && sudo apt install massdns${NC}"; MISSING_DEPS=true
-    fi
-    if ! command -v chromium &>/dev/null && ! command -v google-chrome &>/dev/null; then
-        echo -e "${R}[!] Chromium missing.${NC}"; echo -e "${Y}    -> Run: sudo apt install chromium-browser${NC}"; MISSING_DEPS=true
-    fi
-    [ "$MISSING_DEPS" = true ] && die "Install dependencies manually."
-
-    # Go Tools
-    for t in tmux pv go amass subfinder puredns httpx naabu katana nuclei waybackurls anew jq gum ffuf gowitness; do
-        if ! command -v $t &>/dev/null; then
-            info "Installing $t..."
-            if [ "$t" == "gum" ]; then go install github.com/charmbracelet/gum@latest >/dev/null 2>&1
-            elif [ "$t" == "gowitness" ]; then go install github.com/sensepost/gowitness@latest >/dev/null 2>&1
-            elif [[ "$t" =~ ^(tmux|pv|jq)$ ]]; then warn "Missing $t. Try 'sudo apt install $t'"; else
-                go install -v "github.com/projectdiscovery/$t/v2/cmd/$t@latest" >/dev/null 2>&1 || \
-                go install -v "github.com/tomnomnom/$t@latest" >/dev/null 2>&1
+    for sys_tool in massdns chromium-browser jq pv tmux git; do
+        if ! command -v $sys_tool &>/dev/null; then
+            # Handle aliases/alternatives
+            if [ "$sys_tool" == "chromium-browser" ] && command -v google-chrome &>/dev/null; then continue; fi
+            if [ "$sys_tool" == "chromium-browser" ] && command -v chromium &>/dev/null; then continue; fi
+            
+            warn "Missing system tool: $sys_tool. Installing..."
+            sudo apt update && sudo apt install -y $sys_tool >/dev/null 2>&1
+            
+            # Re-check
+            if ! command -v $sys_tool &>/dev/null; then
+                if [ "$sys_tool" == "massdns" ]; then
+                     echo -e "${R}[!] Failed to install massdns.${NC}"
+                     MISSING_DEPS=true
+                elif [ "$sys_tool" == "chromium-browser" ]; then
+                     echo -e "${R}[!] Failed to install chromium (needed for screenshots).${NC}"
+                     # Not fatal, but warned
+                else
+                     MISSING_DEPS=true
+                fi
             fi
-            export PATH=$PATH:$(go env GOPATH)/bin
         fi
     done
     
+    if [ "$MISSING_DEPS" = true ]; then
+        die "Critical dependencies failed to install. Please install 'massdns', 'jq', 'pv', 'tmux' manually."
+    fi
+
+    # 3. GO TOOLS (AUTO-INSTALLER)
+    # List of tools and their repo paths
+    declare -A tools
+    tools[amass]="github.com/owasp-amass/amass/v3/..."
+    tools[subfinder]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
+    tools[assetfinder]="github.com/tomnomnom/assetfinder"
+    tools[puredns]="github.com/d3mondev/puredns/v2"
+    tools[httpx]="github.com/projectdiscovery/httpx/cmd/httpx"
+    tools[naabu]="github.com/projectdiscovery/naabu/v2/cmd/naabu"
+    tools[katana]="github.com/projectdiscovery/katana/cmd/katana"
+    tools[nuclei]="github.com/projectdiscovery/nuclei/v2/cmd/nuclei"
+    tools[waybackurls]="github.com/tomnomnom/waybackurls"
+    tools[anew]="github.com/tomnomnom/anew"
+    tools[gum]="github.com/charmbracelet/gum"
+    tools[ffuf]="github.com/ffuf/ffuf/v2"
+    tools[gotator]="github.com/josderstad/gotator"
+    tools[gowitness]="github.com/sensepost/gowitness"
+
+    for tool in "${!tools[@]}"; do
+        if ! command -v $tool &>/dev/null; then
+            info "Installing $tool..."
+            go install -v "${tools[$tool]}@latest" >/dev/null 2>&1
+            
+            # Verify install
+            if ! command -v $tool &>/dev/null; then
+                 # Try finding it in typical go path
+                 if [ -f "$HOME/go/bin/$tool" ]; then
+                     # It's there but not in path. Export again to be sure.
+                     export PATH=$PATH:$HOME/go/bin
+                 else
+                     warn "Failed to install $tool. Check your Go setup."
+                 fi
+            fi
+        fi
+    done
+    
+    # 4. Updates
     if [ ! -f "$CONF_DIR/.nuc_chk" ] || [ $(find "$CONF_DIR/.nuc_chk" -mtime +1) ]; then
-        info "Syncing Nuclei..."
-        nuclei -update-templates -silent >/dev/null 2>&1
-        touch "$CONF_DIR/.nuc_chk"
+        if command -v nuclei &>/dev/null; then
+            info "Syncing Nuclei..."
+            nuclei -update-templates -silent >/dev/null 2>&1
+            touch "$CONF_DIR/.nuc_chk"
+        fi
     fi
 }
 
+# --- CONFIG ---
 init_conf() {
     [ "$RESET" = true ] && rm -f "$CONF_FILE" && warn "Config reset."
     if [ ! -f "$CONF_FILE" ]; then touch "$CONF_FILE"; fi
     source "$CONF_FILE"
     
-    # If variable is missing, force setup
     if [ -z "$NOTIFY_SERVICE" ]; then
-        if gum confirm "Configure Alerts?"; then
-            SVC=$(gum choose "Discord" "Slack" "Telegram")
-            echo "NOTIFY_SERVICE=\"$SVC\"" >> "$CONF_FILE"
-            case $SVC in
-                Discord)  VAL=$(gum input --placeholder "Webhook URL" --password); echo "DISCORD_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
-                Slack)    VAL=$(gum input --placeholder "Webhook URL" --password); echo "SLACK_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
-                Telegram) 
-                    TOK=$(gum input --placeholder "Bot Token" --password); echo "TELEGRAM_TOKEN=\"$TOK\"" >> "$CONF_FILE"; 
-                    ID=$(gum input --placeholder "Chat ID"); echo "TELEGRAM_CHATID=\"$ID\"" >> "$CONF_FILE" ;;
-            esac
-            # Reload and Test immediately
-            source "$CONF_FILE"
-            notify "LeetEnum Configured. If you see this, it works!"
-            good "Test notification sent."
+        # If gum is missing, we can't show the wizard properly, fallback to text
+        if command -v gum &>/dev/null; then
+            if gum confirm "Configure Alerts?"; then
+                SVC=$(gum choose "Discord" "Slack" "Telegram")
+                echo "NOTIFY_SERVICE=\"$SVC\"" >> "$CONF_FILE"
+                case $SVC in
+                    Discord)  VAL=$(gum input --placeholder "Webhook URL" --password); echo "DISCORD_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
+                    Slack)    VAL=$(gum input --placeholder "Webhook URL" --password); echo "SLACK_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
+                    Telegram) TOK=$(gum input --placeholder "Bot Token" --password); ID=$(gum input --placeholder "Chat ID"); echo "TELEGRAM_TOKEN=\"$TOK\"" >> "$CONF_FILE"; echo "TELEGRAM_CHATID=\"$ID\"" >> "$CONF_FILE" ;;
+                esac
+                notify "LeetEnum Configured."
+            else
+                echo "NOTIFY_SERVICE=\"None\"" >> "$CONF_FILE"
+            fi
         else
             echo "NOTIFY_SERVICE=\"None\"" >> "$CONF_FILE"
         fi
@@ -131,11 +185,13 @@ init_conf() {
 setup_cron() {
     TGT=$1
     if [ -z "$(crontab -l 2>/dev/null | grep "$SCRIPT_PATH" | grep "$TGT")" ]; then
-        if gum confirm "Add to Auto-Scheduler?"; then
-            D=$(gum input --placeholder "Days interval (e.g. 7)")
-            if [[ "$D" =~ ^[0-9]+$ ]]; then
-                (crontab -l 2>/dev/null; echo "0 0 */$D * * $SCRIPT_PATH -d $TGT -m -no-tmux >> ${HOME}/leetsec_cron.log 2>&1") | crontab -
-                notify "$TGT monitored every $D days."
+        if command -v gum &>/dev/null; then
+            if gum confirm "Add to Auto-Scheduler?"; then
+                D=$(gum input --placeholder "Days interval (e.g. 7)")
+                if [[ "$D" =~ ^[0-9]+$ ]]; then
+                    (crontab -l 2>/dev/null; echo "0 0 */$D * * $SCRIPT_PATH -d $TGT -m -no-tmux >> ${HOME}/leetsec_cron.log 2>&1") | crontab -
+                    notify "$TGT monitored every $D days."
+                fi
             fi
         fi
     fi
@@ -162,9 +218,13 @@ init_conf
 # --- WIZARD ---
 if [ -z "$TARGET" ]; then
     banner
-    TARGET=$(gum input --placeholder "Target Domain")
-    if gum confirm "Enable Deep Port Scan (Slow)?"; then DEEP_SCAN=true; fi
-    if gum confirm "Differential Mode (Monitor)?"; then MONITOR=true; fi
+    if command -v gum &>/dev/null; then
+        TARGET=$(gum input --placeholder "Target Domain")
+        if gum confirm "Enable Deep Port Scan (Slow)?"; then DEEP_SCAN=true; fi
+        if gum confirm "Differential Mode (Monitor)?"; then MONITOR=true; fi
+    else
+        read -p "Enter Target Domain: " TARGET
+    fi
 fi
 
 [ -z "$TARGET" ] && die "Target required."
@@ -176,11 +236,20 @@ if [ -t 0 ] && [ "$NO_TMUX" = false ]; then
     SESS="leet_${TARGET//./_}"
     if [ -z "$TMUX" ]; then
         if tmux has-session -t "$SESS" 2>/dev/null; then
-            gum confirm "Resume active session?" && tmux attach -t "$SESS" && exit 0
-        elif gum confirm "Run in background (Tmux)?"; then
-            tmux new-session -d -s "$SESS" "bash $SCRIPT_PATH -d $TARGET $( [ "$MONITOR" = true ] && echo "-m" ) $( [ "$DEEP_SCAN" = true ] && echo "--deep" ) -no-tmux; bash"
-            tmux attach -t "$SESS"
-            exit 0
+            if command -v gum &>/dev/null; then
+                 gum confirm "Resume active session?" && tmux attach -t "$SESS" && exit 0
+            else
+                 tmux attach -t "$SESS" && exit 0
+            fi
+        else
+            # Only ask if gum is available, else auto-run or warn
+            if command -v gum &>/dev/null; then
+                if gum confirm "Run in background (Tmux)?"; then
+                    tmux new-session -d -s "$SESS" "bash $SCRIPT_PATH -d $TARGET $( [ "$MONITOR" = true ] && echo "-m" ) $( [ "$DEEP_SCAN" = true ] && echo "--deep" ) -no-tmux; bash"
+                    tmux attach -t "$SESS"
+                    exit 0
+                fi
+            fi
         fi
     fi
 fi
@@ -224,7 +293,7 @@ WL_RES="${WORK_DIR}/resolvers.txt"
 [ ! -s "$WL_PERM" ] && wget -q https://raw.githubusercontent.com/m4ll0k/BBTz/master/perm_words.txt -O "$HOME/perm_words.txt"
 wget -q https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt -O "$WL_RES"
 
-notify "LeetEnum Started: $TARGET [$PROF]"
+notify "🚀 LeetEnum Started: $TARGET [$PROF]"
 
 # 1. PASSIVE
 if [ ! -f "$LOCK_DIR/p1" ]; then
@@ -321,17 +390,11 @@ if [ -s "$WORK_DIR/master.txt" ]; then
     
     httpx -l "$T_LIST" -threads "$HTTPX" -random-agent -retries 2 -timeout 10 -sc -title -tech-detect -ip -cname -server -o "$FINAL_DIR/http_full.txt" -silent > /dev/null 2>&1
     
-    # SORTING - SEPARATE FILES
+    # SORTING
     awk '{print $1}' "$FINAL_DIR/http_full.txt" | sort $SORT -u > "$WORK_DIR/live.txt"
     grep "\[200\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/200.txt"
-    grep "\[301\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/301.txt"
-    grep "\[302\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/302.txt"
-    grep "\[401\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/401.txt"
     grep "\[403\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/403.txt"
     grep "\[404\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/404.txt"
-    grep "\[500\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/500.txt"
-    
-    # Clean Live List for Fuzzing
     cp "$WORK_DIR/live.txt" "$FINAL_DIR/live_urls.txt"
 fi
 
@@ -341,7 +404,6 @@ if [ -s "$WORK_DIR/live.txt" ]; then
     if command -v gowitness &>/dev/null; then
         echo -e "${C}    -> Taking Screenshots...${NC}"
         mkdir -p "$FINAL_DIR/screenshots"
-        # FIXED: Removed --chrome-arg flags entirely to fix compatibility
         gowitness scan file -f "$WORK_DIR/live.txt" -s "$FINAL_DIR/screenshots/" --threads 10 --no-http > "$RPT_DIR/gowitness.log" 2>&1
     fi
 fi
