@@ -7,8 +7,11 @@
 # --- CORE ---
 export LC_ALL=C
 export TERM=xterm-256color
+export GIT_TERMINAL_PROMPT=0
 # CRITICAL FIX: Add Go Bin path immediately so script can see installed tools
 export PATH=$PATH:$HOME/go/bin:/usr/local/go/bin
+# CRITICAL FIX: Use Go Proxy to avoid git auth errors
+export GOPROXY=https://proxy.golang.org,direct
 
 CONF_DIR="$HOME/.config/leetsec"
 CONF_FILE="$CONF_DIR/leetenum.conf"
@@ -61,10 +64,15 @@ notify() {
 # --- ROBUST DEPENDENCY MANAGER ---
 check_gear() {
     mkdir -p "$CONF_DIR"
-    ! ping -c 1 8.8.8.8 &>/dev/null && die "Network unreachable. Check your internet."
+    
+    # 0. Connectivity Check (Ping -> Curl fallback)
+    if ! ping -c 1 8.8.8.8 &>/dev/null; then
+        if ! curl -s --head http://google.com >/dev/null; then
+             warn "Network unreachable (Ping & Curl failed). Tools might not install."
+        fi
+    fi
 
-    # 1. CORE DEPENDENCIES (Must exist first)
-    # Check for Go first because we need it for everything else
+    # 1. CORE DEPENDENCIES
     if ! command -v go &>/dev/null; then
         warn "Golang not found. Attempting to install..."
         if command -v apt &>/dev/null; then
@@ -73,44 +81,74 @@ check_gear() {
              sudo pacman -S go
         fi
         
-        # Check again
         if ! command -v go &>/dev/null; then
-            die "Could not install Golang automatically. Please install Go manually: https://go.dev/doc/install"
+            die "Could not install Golang automatically. Please install Go manually."
         fi
     fi
+    
+    # Configure Go environment (Fix for gotator/naabu install issues)
+    go env -w GO111MODULE=on 2>/dev/null
 
-    # 2. SYSTEM TOOLS (APT)
+    # 2. SYSTEM TOOLS & LIBRARIES
+    echo -e "${Y}[*] Checking system libraries...${NC}"
+    if command -v apt &>/dev/null; then
+        # Quietly ensure libpcap is there for naabu
+        sudo apt-get update >/dev/null 2>&1
+        sudo apt-get install -y libpcap-dev build-essential >/dev/null 2>&1
+    fi
+
+    NEEDS_UPDATE=false
+    for t in massdns jq pv tmux git; do
+        if ! command -v $t &>/dev/null; then NEEDS_UPDATE=true; break; fi
+    done
+    
+    if ! command -v chromium &>/dev/null && ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then
+        NEEDS_UPDATE=true
+    fi
+
+    if [ "$NEEDS_UPDATE" = true ]; then
+        echo -e "${Y}[*] Installing missing system tools...${NC}"
+    fi
+
     MISSING_DEPS=false
-    for sys_tool in massdns chromium-browser jq pv tmux git; do
-        if ! command -v $sys_tool &>/dev/null; then
-            # Handle aliases/alternatives
-            if [ "$sys_tool" == "chromium-browser" ] && command -v google-chrome &>/dev/null; then continue; fi
-            if [ "$sys_tool" == "chromium-browser" ] && command -v chromium &>/dev/null; then continue; fi
-            
-            warn "Missing system tool: $sys_tool. Installing..."
-            sudo apt update && sudo apt install -y $sys_tool >/dev/null 2>&1
-            
-            # Re-check
-            if ! command -v $sys_tool &>/dev/null; then
-                if [ "$sys_tool" == "massdns" ]; then
-                     echo -e "${R}[!] Failed to install massdns.${NC}"
-                     MISSING_DEPS=true
-                elif [ "$sys_tool" == "chromium-browser" ]; then
-                     echo -e "${R}[!] Failed to install chromium (needed for screenshots).${NC}"
-                     # Not fatal, but warned
-                else
-                     MISSING_DEPS=true
-                fi
+    install_sys_tool() {
+        bin=$1; pkg=$2
+        if ! command -v $bin &>/dev/null; then
+            warn "Missing $bin. Installing $pkg..."
+            sudo apt-get install -y $pkg >/dev/null 2>&1
+            if ! command -v $bin &>/dev/null; then
+                echo -e "${R}[!] Failed to install $bin.${NC}"
+                return 1
+            else
+                echo -e "${G}    -> $bin installed.${NC}"
             fi
         fi
-    done
+        return 0
+    }
+
+    install_sys_tool "massdns" "massdns" || MISSING_DEPS=true
+    install_sys_tool "jq" "jq" || MISSING_DEPS=true
+    install_sys_tool "pv" "pv" || MISSING_DEPS=true
+    install_sys_tool "tmux" "tmux" || MISSING_DEPS=true
+
+    # Chromium Logic
+    if ! command -v chromium &>/dev/null && ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then
+        warn "Missing Chromium. Trying 'chromium'..."
+        sudo apt-get install -y chromium >/dev/null 2>&1
+        if ! command -v chromium &>/dev/null; then
+             warn "Trying 'chromium-browser'..."
+             sudo apt-get install -y chromium-browser >/dev/null 2>&1
+        fi
+        if ! command -v chromium &>/dev/null && ! command -v chromium-browser &>/dev/null; then
+             echo -e "${Y}[!] Could not install Chromium. Screenshots will be disabled.${NC}"
+        fi
+    fi
     
     if [ "$MISSING_DEPS" = true ]; then
         die "Critical dependencies failed to install. Please install 'massdns', 'jq', 'pv', 'tmux' manually."
     fi
 
     # 3. GO TOOLS (AUTO-INSTALLER)
-    # List of tools and their repo paths
     declare -A tools
     tools[amass]="github.com/owasp-amass/amass/v3/..."
     tools[subfinder]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
@@ -130,16 +168,16 @@ check_gear() {
     for tool in "${!tools[@]}"; do
         if ! command -v $tool &>/dev/null; then
             info "Installing $tool..."
-            go install -v "${tools[$tool]}@latest" >/dev/null 2>&1
+            # Try install and capture error if it fails
+            ERR_MSG=$(go install -v "${tools[$tool]}@latest" 2>&1)
             
-            # Verify install
             if ! command -v $tool &>/dev/null; then
-                 # Try finding it in typical go path
                  if [ -f "$HOME/go/bin/$tool" ]; then
-                     # It's there but not in path. Export again to be sure.
                      export PATH=$PATH:$HOME/go/bin
                  else
-                     warn "Failed to install $tool. Check your Go setup."
+                     echo -e "${R}[!] Failed to install $tool.${NC}"
+                     echo -e "${Y}Detail:${NC} $ERR_MSG"
+                     echo -e "${Y}Try running manually: go install -v ${tools[$tool]}@latest${NC}"
                  fi
             fi
         fi
@@ -162,7 +200,6 @@ init_conf() {
     source "$CONF_FILE"
     
     if [ -z "$NOTIFY_SERVICE" ]; then
-        # If gum is missing, we can't show the wizard properly, fallback to text
         if command -v gum &>/dev/null; then
             if gum confirm "Configure Alerts?"; then
                 SVC=$(gum choose "Discord" "Slack" "Telegram")
@@ -242,7 +279,6 @@ if [ -t 0 ] && [ "$NO_TMUX" = false ]; then
                  tmux attach -t "$SESS" && exit 0
             fi
         else
-            # Only ask if gum is available, else auto-run or warn
             if command -v gum &>/dev/null; then
                 if gum confirm "Run in background (Tmux)?"; then
                     tmux new-session -d -s "$SESS" "bash $SCRIPT_PATH -d $TARGET $( [ "$MONITOR" = true ] && echo "-m" ) $( [ "$DEEP_SCAN" = true ] && echo "--deep" ) -no-tmux; bash"
@@ -293,7 +329,7 @@ WL_RES="${WORK_DIR}/resolvers.txt"
 [ ! -s "$WL_PERM" ] && wget -q https://raw.githubusercontent.com/m4ll0k/BBTz/master/perm_words.txt -O "$HOME/perm_words.txt"
 wget -q https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt -O "$WL_RES"
 
-notify "🚀 LeetEnum Started: $TARGET [$PROF]"
+notify "LeetEnum Started: $TARGET [$PROF]"
 
 # 1. PASSIVE
 if [ ! -f "$LOCK_DIR/p1" ]; then
@@ -302,6 +338,10 @@ if [ ! -f "$LOCK_DIR/p1" ]; then
     subfinder -d "$TARGET" -all -silent > "$WORK_DIR/subfinder.txt"
     assetfinder --subs-only "$TARGET" > "$WORK_DIR/asset.txt"
     curl -s "https://crt.sh/?q=%25.$TARGET&output=json" | jq -r '.[].name_value' 2>/dev/null | sed 's/\*\.//g' | sort -u > "$WORK_DIR/crt.txt"
+    
+    # RE-ADDED: Wayback Subdomain Mining (The missing piece)
+    curl -s "http://web.archive.org/cdx/search/cdx?url=*.$TARGET/*&output=text&fl=original&collapse=urlkey" | awk -F/ '{print $3}' | sort -u > "$WORK_DIR/wayback.txt"
+    
     cat "$WORK_DIR"/*.txt 2>/dev/null | sort $SORT -u | grep -F ".$TARGET" > "$WORK_DIR/passive_raw.txt"
     if [ -s "$WORK_DIR/passive_raw.txt" ]; then
         puredns resolve "$WORK_DIR/passive_raw.txt" -r "$WL_RES" -w "$WORK_DIR/passive_valid.txt" --rate-limit "$LIMIT" >/dev/null 2>&1
@@ -358,8 +398,14 @@ if [ ! -f "$LOCK_DIR/p4" ]; then
     S_CNT=$(wc -l < "$WORK_DIR/seeds.txt")
     if [ "$S_CNT" -gt 0 ]; then
         [ "$S_CNT" -gt 50000 ] && head -n 50000 "$WORK_DIR/seeds.txt" > "$WORK_DIR/gotator_seeds.txt" || cp "$WORK_DIR/seeds.txt" "$WORK_DIR/gotator_seeds.txt"
-        timeout 60m gotator -sub "$WORK_DIR/gotator_seeds.txt" -perm "$WL_PERM" -depth 1 -silent -md > "$WORK_DIR/perms_raw.txt"
-        [ -s "$WORK_DIR/perms_raw.txt" ] && puredns resolve "$WORK_DIR/perms_raw.txt" -r "$WL_RES" -w "$WORK_DIR/perms_valid.txt" --rate-limit "$LIMIT" >/dev/null 2>&1
+        
+        # Safe check for gotator
+        if command -v gotator >/dev/null; then
+            timeout 60m gotator -sub "$WORK_DIR/gotator_seeds.txt" -perm "$WL_PERM" -depth 1 -silent -md > "$WORK_DIR/perms_raw.txt" 2>/dev/null
+            [ -s "$WORK_DIR/perms_raw.txt" ] && puredns resolve "$WORK_DIR/perms_raw.txt" -r "$WL_RES" -w "$WORK_DIR/perms_valid.txt" --rate-limit "$LIMIT" >/dev/null 2>&1
+        else
+            warn "Gotator missing/failed. Skipping."
+        fi
     fi
     cp "$WORK_DIR/perms_valid.txt" "$FINAL_DIR/perms.txt" 2>/dev/null
     touch "$LOCK_DIR/p4"
@@ -404,7 +450,7 @@ if [ -s "$WORK_DIR/live.txt" ]; then
     if command -v gowitness &>/dev/null; then
         echo -e "${C}    -> Taking Screenshots...${NC}"
         mkdir -p "$FINAL_DIR/screenshots"
-        gowitness scan file -f "$WORK_DIR/live.txt" -s "$FINAL_DIR/screenshots/" --threads 10 --no-http > "$RPT_DIR/gowitness.log" 2>&1
+        gowitness scan file -f "$WORK_DIR/live.txt" -s "$FINAL_DIR/screenshots/" --threads 10 --no-http --chrome-arg='--no-sandbox' --chrome-arg='--disable-gpu' > "$RPT_DIR/gowitness.log" 2>&1
     fi
 fi
 
@@ -447,9 +493,9 @@ cat << EOF > "$FINAL_DIR/REPORT.md"
 | Vulns | $VULN |
 
 ## Status Codes
-- 200 OK: $(wc -l < "$FINAL_DIR/200.txt")
-- 403 Forbidden: $(wc -l < "$FINAL_DIR/403.txt")
-- 404 Not Found: $(wc -l < "$FINAL_DIR/404.txt")
+- 200 OK: $(wc -l < "$FINAL_DIR/200.txt" 2>/dev/null || echo 0)
+- 403 Forbidden: $(wc -l < "$FINAL_DIR/403.txt" 2>/dev/null || echo 0)
+- 404 Not Found: $(wc -l < "$FINAL_DIR/404.txt" 2>/dev/null || echo 0)
 
 [View Data]($FINAL_DIR)
 EOF
