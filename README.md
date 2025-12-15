@@ -135,6 +135,3 @@ All your results are saved nicely in the `recon_<target>/<timestamp>/` folder.
 Please do not use this tool on websites where you do not have written permission. The author is not responsible for any misuse or damage caused by this tool.
 
 **Happy Hunting\! 🎯**
-
-```
-```
