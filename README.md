@@ -49,7 +49,7 @@ It is very simple to install. Just open your terminal and run these commands one
 
 **Step 1: Download the tool**
 ```bash
-git clone [https://github.com/theleetsec/LeetSec-Tools.git](https://github.com/theleetsec/LeetSec-Tools.git)
+git clone https://github.com/theleetsec/LeetSec-Tools.git
 cd LeetSec-Tools
 ````
 
