@@ -10,7 +10,7 @@
 
 **LeetEnum** is a high-performance, fully automated reconnaissance engine designed for Bug Bounty Hunters and Red Teamers who want results, not headaches.
 
-We know the struggle—running `subfinder`, then sorting files, then running `httpx`, then `nuclei` one by one... it is a big headache and takes too much time.
+We know the struggle of running `subfinder`, then sorting files, then running `httpx`, then `nuclei` one by one... it is a big headache and takes too much time.
 
 **LeetEnum solves this problem.** You just give it a domain name, and it handles the entire kill chain automatically. It is built to be a **"Set and Forget"** tool. You run the command, go sleep or watch a movie, and get a notification on your phone when the hacking is done.
 
