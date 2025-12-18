@@ -25,7 +25,7 @@ START_TIME=$(date +%s)
 UPDATE_URL="https://raw.githubusercontent.com/theleetsec/LeetSec-Tools/main/leetenum.sh"
 
 CONF_DIR="$HOME/.config/leetsec"
-CONF_FILE="$CONF_DIR/leetenum.conf"
+CONF_FILE="$CONF_DIR/leetsec.conf"
 SCRIPT_PATH=$(realpath "$0")
 
 # --- The Aesthetic ---
@@ -590,3 +590,4 @@ LIVE=$(wc -l < "$WORK_DIR/live.txt")
 show_completion "$TARGET" "$DNS" "$VULN" "$FINAL_DIR"
 
 notify "✅ LeetEnum: $TARGET | Subs: $DNS | Vulns: $VULN"
+
