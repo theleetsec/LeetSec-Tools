@@ -29,7 +29,7 @@ It is built to be **Smart**. It checks your RAM and CPU before starting. If you 
     Run the tool today on `target.com`. Run it again after 7 days.
     The tool will compare the results and tell you **only the NEW subdomains** that appeared. This is best for finding fresh bugs before anyone else.
 
-3.  **💀 DNS Takeover Detection (New in v8.0)**
+3.  **💀 DNS Takeover Detection**
     Most tools miss this. LeetEnum checks for Subdomain Takeovers on **all** resolved domains, even the ones that don't have a web server running.
 
 4.  **⚡ CDN Exclusion (Smart Scanning)**
