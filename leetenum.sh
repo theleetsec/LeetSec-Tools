@@ -26,7 +26,7 @@ CONF_DIR="$HOME/.config/leetsec"
 CONF_FILE="$CONF_DIR/leetenum.conf"
 SCRIPT_PATH=$(realpath "$0")
 
-# --- GEN Z PALETTE (The Aesthetic) ---
+# --- The Aesthetic ---
 R='\033[0;31m'         # Red
 G='\033[0;32m'         # Green
 Y='\033[1;33m'         # Yellow
@@ -37,7 +37,7 @@ C='\033[0;36m'         # Cyan
 O='\033[38;5;208m'     # Orange
 NC='\033[0m'           # No Color
 
-# Social Flex Messages
+# Messages
 FLEX_MESSAGES=(
     "Hunting P1s like it's a hobby. 💅"
     "Scanning the planet, one packet at a time. 🌍"
@@ -441,16 +441,17 @@ if [ ! -f "$LOCK_DIR/p3" ]; then
     CNT=$(wc -l < "$WORK_DIR/rec_targets.txt")
     if [ "$CNT" -gt 0 ]; then
         phase_header "3" "Deep Scanning ($CNT targets)"
+        
         do_rec() {
             s=$1; w=$2; r=$3; o=$4; l=$5; h=$(echo "$s"|md5sum|cut -d' ' -f1)
             puredns bruteforce "$w" "$s" -r "$r" -w "$o/r_$h.txt" --rate-limit "$l" >/dev/null 2>&1
         }
         export -f do_rec
-        if [ -t 0 ] && command -v pv >/dev/null; then
-            cat "$WORK_DIR/rec_targets.txt" | pv -l -s "$CNT" -N "Recursion" | xargs -P "$PARALLEL" -I {} bash -c "do_rec '{}' '$WORK_DIR/rec_wl.txt' '$WL_RES' '$WORK_DIR' '$JOB_LIMIT'"
-        else
-            cat "$WORK_DIR/rec_targets.txt" | xargs -P "$PARALLEL" -I {} bash -c "do_rec '{}' '$WORK_DIR/rec_wl.txt' '$WL_RES' '$WORK_DIR' '$JOB_LIMIT'"
-        fi
+        
+        REC_CMD="cat $WORK_DIR/rec_targets.txt | xargs -P $PARALLEL -I {} bash -c 'do_rec \"{}\" \"$WORK_DIR/rec_wl.txt\" \"$WL_RES\" \"$WORK_DIR\" \"$JOB_LIMIT\"'"
+        
+        run_with_spinner "Brute Forcing $CNT targets ($PARALLEL threads)" "$REC_CMD"
+
         cat "$WORK_DIR"/r_*.txt >> "$WORK_DIR/recursive.txt" 2>/dev/null
         rm "$WORK_DIR"/r_*.txt 2>/dev/null
     fi
@@ -561,4 +562,5 @@ VULN=$(wc -l < "$RPT_DIR/nuclei.txt")
 LIVE=$(wc -l < "$WORK_DIR/live.txt")
 
 show_completion "$TARGET" "$DNS" "$VULN" "$FINAL_DIR"
+
 notify "✅ LeetEnum: $TARGET | Subs: $DNS | Vulns: $VULN"
