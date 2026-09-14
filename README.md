@@ -12,8 +12,8 @@ its community stars and forks remain attached to the project.
 
 ## Features
 
-- 12 parallel passive discovery sources, with DNS records, certificate names, and
-  public archive lookups
+- 12+ passive discovery sources, including nine public HTTP APIs that run in
+  parallel, plus DNS records, certificate names, and archive lookups
 - Tiered DNS brute force, recursive brute force, and gotator permutations
 - Resolver health checks, scope filtering, atomic artifacts, and resumable checkpoints
 - RAM/CPU auto-tuning with `lite`, `balanced`, and `beast` profiles
