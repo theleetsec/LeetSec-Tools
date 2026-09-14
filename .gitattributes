@@ -1,0 +1,48 @@
+# Line endings.
+#
+# The published leetenum.sh carried one CR per line — 566 of them — which made
+# bash execute lines 2 and 6 as bogus $'\r' commands and then abort at the first
+# function definition. No function was ever defined, so no argument parsing ever
+# ran: the only published interface was dead on Linux, macOS and WSL alike.
+#
+# `* text=auto` normalises on the way into the index. The later, more specific
+# rules pin the files where a CR is not a cosmetic problem but a syntax error:
+# a shell interpreter treats \r as part of the token, and a Go raw string or a
+# testdata fixture compares byte-for-byte.
+#
+# Order matters here — the last matching pattern wins.
+* text=auto
+
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.go    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.rb    text eol=lf
+*.json  text eol=lf
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+LICENSE         text eol=lf
+
+# Extensionless executables. Matched by name because there is nothing else to
+# match on, and these are the files where a stray CR is fatal.
+leetenum        text eol=lf
+install.sh      text eol=lf
+
+# Binary, or otherwise not to be touched.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.gz    binary
+*.tgz   binary
+*.zip   binary
+*.tar   binary
+
+# Wordlists and resolver lists ship as data and must stay byte-identical, so the
+# shell and Go implementations agree on the permutation output the tests compare.
+*.txt   -text

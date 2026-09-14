@@ -1,566 +1,408 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# leetenum.sh — LeetEnum entrypoint.
+#
+# Reconnaissance pipeline. Property of LeetSecurity LLC.
+#
+# This file does three things and nothing else: locate lib/, parse the command
+# line, and dispatch. All behaviour lives in lib/. The previous single-file
+# version mixed argument parsing, tool installation, UI drawing and the scan
+# itself across 567 lines with shared mutable globals, which is why a change to
+# one phase could silently break another.
+#
+# Deliberately NOT using `set -e`. A recon pipeline runs a dozen third-party
+# binaries that legitimately exit non-zero (no results found, rate limited,
+# template parse warning). Under `set -e` the original aborted mid-scan and
+# discarded work already done. Failures are handled per step instead, and
+# `set -u` still catches genuine typos.
+set -uo pipefail
 
-# ============================================================
-# LeetEnum v1.0 // Property of LeetSec
-# ============================================================
+LEETENUM_VERSION="1.0.0"
 
-# --- SELF-CORRECTION ---
-if [ -z "$BASH_VERSION" ]; then
-    exec bash "$0" "$@"
-fi
-
-# --- CORE ---
-export LC_ALL=C.UTF-8
-export TERM=xterm-256color
-export GIT_TERMINAL_PROMPT=0
-export PATH=$PATH:$HOME/go/bin:/usr/local/go/bin
-export GOPROXY=https://proxy.golang.org,direct
-
-# START TIMER
-START_TIME=$(date +%s)
-
-# UPDATE CONFIGURATION
-UPDATE_URL="https://raw.githubusercontent.com/theleetsec/LeetSec-Tools/main/leetenum.sh"
-
-CONF_DIR="$HOME/.config/leetsec"
-CONF_FILE="$CONF_DIR/leetenum.conf"
-SCRIPT_PATH=$(realpath "$0")
-
-# --- The Aesthetic ---
-R='\033[0;31m'         # Red
-G='\033[0;32m'         # Green
-Y='\033[1;33m'         # Yellow
-B='\033[0;34m'         # Blue
-P='\033[38;5;201m'     # Neon Pink
-L='\033[38;5;154m'     # Lime Green
-C='\033[0;36m'         # Cyan
-O='\033[38;5;208m'     # Orange
-NC='\033[0m'           # No Color
-
-# Messages
-FLEX_MESSAGES=(
-    "Hunting P1s like it's a hobby. 💅"
-    "Scanning the planet, one packet at a time. 🌍"
-    "Cyberpunk vibes only. 👾"
-    "Enumeration is an art form. 🎨"
-    "No Target is Safe. 🛡️💀"
-    "Turning coffee into RCEs. ☕➡️💥"
-    "Your firewall is just a suggestion. 🚧"
-    "Making Recon look good since 2025. ✨"
-)
-
-# Animation Elements
-SPINNER=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-
-# --- UI FUNCTIONS ---
-get_flex() {
-    echo "${FLEX_MESSAGES[$RANDOM % ${#FLEX_MESSAGES[@]}]}"
-}
-
-# The Visual Heartbeat
-run_with_spinner() {
-    local msg="$1"
-    shift
-    local cmd="$@"
-    
-    eval "$cmd" &
-    local pid=$!
-    tput civis
-    
-    local i=0
-    while kill -0 $pid 2>/dev/null; do
-        printf "\r${P}${SPINNER[i]} ${C}%s...${NC}" "$msg"
-        i=$(( (i+1) % ${#SPINNER[@]} ))
-        sleep 0.1
+# ---------------------------------------------------------------------------
+# Self-location.
+#
+# Must survive being invoked through a symlink, because that is exactly how
+# install.sh and the Homebrew formula expose it. `dirname "$0"` alone resolves
+# to /usr/local/bin and lib/ is not there.
+# ---------------------------------------------------------------------------
+_ls_self() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [ -L "$src" ]; do
+        dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+        src=$(readlink "$src")
+        case "$src" in /*) ;; *) src="${dir}/${src}" ;; esac
     done
-    
-    wait $pid
-    local exit_code=$?
-    tput cnorm
-    
-    if [ $exit_code -eq 0 ]; then
-        printf "\r${L}✔ ${C}%s ${L}Done.${NC}                        \n" "$msg"
-    else
-        printf "\r${R}✘ ${C}%s ${R}Failed (or empty).${NC}              \n" "$msg"
-    fi
-    return $exit_code
+    cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
 }
 
-print_count() {
-    local label="$1"
-    local file="$2"
-    if [ -f "$file" ]; then
-        local cnt=$(wc -l < "$file")
-        echo -e "   ${O}└─> ${B}$label: ${L}$cnt${NC}"
-    else
-        echo -e "   ${O}└─> ${B}$label: ${R}0${NC}"
+LS_ROOT=$(_ls_self)
+LS_LIB="${LEETENUM_LIB_DIR:-${LS_ROOT}/lib}"
+
+for _m in compat ui config deps pipeline; do
+    if [ ! -r "${LS_LIB}/${_m}.sh" ]; then
+        printf 'leetenum: cannot find %s/%s.sh\n' "$LS_LIB" "$_m" >&2
+        printf 'Set LEETENUM_LIB_DIR or reinstall.\n' >&2
+        exit 1
     fi
-}
-
-banner() {
-    clear
-    echo -e "${P}"
-    cat << "EOF"
-██╗     ███████╗███████╗████████╗███████╗███╗   ██╗██╗   ██╗███╗   ███╗
-██║     ██╔════╝██╔════╝╚══██╔══╝██╔════╝████╗  ██║██║   ██║████╗ ████║
-██║     █████╗  █████╗     ██║   █████╗  ██╔██╗ ██║██║   ██║██╔████╔██║
-██║     ██╔══╝  ██╔══╝     ██║   ██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║
-███████╗███████╗███████╗   ██║   ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║
-╚══════╝╚══════╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝
-EOF
-    echo -e "${NC}"
-    echo -e "${L}>>> ${C}LeetSec Recon Engine v1.0 ${L}<<<${NC}"
-    echo -e "${O}🔥 $(get_flex) 🔥${NC}\n"
-}
-
-phase_header() {
-    local title="$1"
-    local desc="$2"
-    echo ""
-    echo -e "${P}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${P}║${NC} ${L}PHASE: $title${NC} ${P}$(printf '%*s' $((65-${#title})) | tr ' ' '║')${NC}"
-    if [ -n "$desc" ]; then
-        echo -e "${P}║${NC} $desc $(printf '%*s' $((67-${#desc})) | tr ' ' '║')${NC}"
-    fi
-    echo -e "${P}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-}
-
-show_completion() {
-    local target="$1"
-    local subs="$2"
-    local vulns="$3"
-    local saved="$4"
-    
-    END_TIME=$(date +%s)
-    DURATION=$((END_TIME - START_TIME))
-    H=$((DURATION / 3600))
-    M=$(( (DURATION % 3600) / 60 ))
-    S=$((DURATION % 60))
-    
-    echo ""
-    echo -e "${P}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${P}║${NC} ${L}🎯 LEETENUM MISSION COMPLETE 🎯${NC} ${P}                                       ║${NC}"
-    echo -e "${P}║${NC} ${C}Target: $target${NC} ${P}                                                      ║${NC}"
-    echo -e "${P}║${NC} ${O}Time:   ${H}h ${M}m ${S}s${NC} ${P}                                                   ║${NC}"
-    echo -e "${P}║${NC} ${L}Subs:   $subs | Vulns: $vulns${NC} ${P}                                           ║${NC}"
-    echo -e "${P}║${NC} ${Y}📸 $(get_flex) 📸${NC} ${P}                                                  ║${NC}"
-    echo -e "${P}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
-    echo -e "${B}Output: $saved${NC}"
-    echo ""
-}
-
-die() { echo -e "${R}💀 [FATAL] $1${NC}"; exit 1; }
-warn() { echo -e "${Y}⚠️  [WARN] $1${NC}"; }
-info() { echo -e "${C}ℹ️  [INFO] $1${NC}"; }
-good() { echo -e "${L}✅ [GUCCI] $1${NC}"; }
-
-# Cleanup
-cleanup() {
-    tput cnorm
-    exit 0
-}
-trap cleanup SIGINT SIGTERM
-
-# Alerts
-notify() {
-    msg="$1"
-    [ -f "$CONF_FILE" ] && source "$CONF_FILE"
-    
-    if [ "$NOTIFY_SERVICE" == "Discord" ] && [ -n "$DISCORD_WEBHOOK" ]; then
-        curl -s -H "Content-Type: application/json" -d "{\"content\": \"$msg\"}" "$DISCORD_WEBHOOK" > /dev/null
-    elif [ "$NOTIFY_SERVICE" == "Slack" ] && [ -n "$SLACK_WEBHOOK" ]; then
-        curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$msg\"}" "$SLACK_WEBHOOK" > /dev/null
-    elif [ "$NOTIFY_SERVICE" == "Telegram" ] && [ -n "$TELEGRAM_TOKEN" ]; then
-        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$TELEGRAM_CHATID" -d text="$msg" > /dev/null
-    fi
-}
-
-# --- SELF UPDATER ---
-update_tool() {
-    info "Checking for LeetEnum updates..."
-    if ! ping -c 1 8.8.8.8 &>/dev/null; then die "No internet connection."; fi
-    if curl -sL "$UPDATE_URL" -o "${SCRIPT_PATH}.new"; then
-        if grep -q "LeetEnum" "${SCRIPT_PATH}.new"; then
-            cp "$SCRIPT_PATH" "${SCRIPT_PATH}.bak"
-            mv "${SCRIPT_PATH}.new" "$SCRIPT_PATH"
-            chmod +x "$SCRIPT_PATH"
-            good "Update successful! Restarting..."
-            exit 0
-        else
-            rm "${SCRIPT_PATH}.new" 2>/dev/null
-            die "Update failed. Invalid file received."
-        fi
-    else
-        die "Failed to download update."
-    fi
-}
-
-# --- DEPENDENCY MANAGER ---
-detect_pkg_mgr() {
-    if command -v apt-get &>/dev/null; then PKG_MGR="apt-get"; INSTALL_CMD="sudo apt-get install -y"; UPDATE_CMD="sudo apt-get update"
-    elif command -v pacman &>/dev/null; then PKG_MGR="pacman"; INSTALL_CMD="sudo pacman -Sy --noconfirm"; UPDATE_CMD="sudo pacman -Sy"
-    elif command -v dnf &>/dev/null; then PKG_MGR="dnf"; INSTALL_CMD="sudo dnf install -y"; UPDATE_CMD="sudo dnf check-update"
-    elif command -v apk &>/dev/null; then PKG_MGR="apk"; INSTALL_CMD="sudo apk add --no-cache"; UPDATE_CMD="sudo apk update"
-    else die "Unknown package manager."; fi
-}
-
-check_gear() {
-    if [ ! -w "$(pwd)" ]; then die "Cannot write to current directory."; fi
-    mkdir -p "$CONF_DIR"
-    if ! ping -c 1 8.8.8.8 &>/dev/null; then warn "Network unreachable."; fi
-
-    detect_pkg_mgr
-
-    if ! command -v go &>/dev/null; then
-        run_with_spinner "Installing Golang" "$INSTALL_CMD golang-go || $INSTALL_CMD go"
-        ! command -v go &>/dev/null && die "Go install failed."
-    fi
-    go env -w GO111MODULE=on 2>/dev/null
-
-    NEEDS_UPDATE=false
-    for t in massdns jq pv tmux git; do
-        if ! command -v $t &>/dev/null; then NEEDS_UPDATE=true; break; fi
-    done
-    if ! command -v chromium &>/dev/null && ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then NEEDS_UPDATE=true; fi
-
-    if [ "$NEEDS_UPDATE" = true ]; then
-        run_with_spinner "Updating system packages" "$UPDATE_CMD >/dev/null 2>&1"
-        [ "$PKG_MGR" == "apt-get" ] && sudo apt-get install -y libpcap-dev build-essential >/dev/null 2>&1
-    fi
-
-    install_sys() {
-        bin=$1; pkg=$2
-        if ! command -v $bin &>/dev/null; then run_with_spinner "Installing $bin" "$INSTALL_CMD $pkg >/dev/null 2>&1"; fi
-    }
-    install_sys "massdns" "massdns"; install_sys "jq" "jq"; install_sys "pv" "pv"; install_sys "tmux" "tmux"; install_sys "git" "git"
-
-    if ! command -v massdns &>/dev/null; then
-        warn "Building MassDNS from source..."
-        git clone https://github.com/blechschmidt/massdns.git /tmp/massdns >/dev/null 2>&1
-        cd /tmp/massdns && make >/dev/null 2>&1 && sudo make install >/dev/null 2>&1
-        cd - >/dev/null
-    fi
-    
-    if ! command -v chromium &>/dev/null && ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then
-        if [ "$PKG_MGR" == "pacman" ]; then $INSTALL_CMD chromium; else $INSTALL_CMD chromium-browser || $INSTALL_CMD chromium; fi
-    fi
-    
-    declare -A tools
-    tools[amass]="github.com/owasp-amass/amass/v3/..."
-    tools[subfinder]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
-    tools[assetfinder]="github.com/tomnomnom/assetfinder"
-    tools[puredns]="github.com/d3mondev/puredns/v2"
-    tools[httpx]="github.com/projectdiscovery/httpx/cmd/httpx"
-    tools[naabu]="github.com/projectdiscovery/naabu/v2/cmd/naabu"
-    tools[katana]="github.com/projectdiscovery/katana/cmd/katana"
-    tools[nuclei]="github.com/projectdiscovery/nuclei/v2/cmd/nuclei"
-    tools[waybackurls]="github.com/tomnomnom/waybackurls"
-    tools[anew]="github.com/tomnomnom/anew"
-    tools[gum]="github.com/charmbracelet/gum"
-    tools[ffuf]="github.com/ffuf/ffuf/v2"
-    tools[gotator]="github.com/josderstad/gotator"
-    tools[gowitness]="github.com/sensepost/gowitness"
-
-    for tool in "${!tools[@]}"; do
-        if ! command -v $tool &>/dev/null; then
-            run_with_spinner "Installing $tool" "go install -v '${tools[$tool]}@latest' >/dev/null 2>&1"
-            # Gotator Failsafe
-            if [ "$tool" == "gotator" ] && ! command -v gotator &>/dev/null; then
-                run_with_spinner "Legacy Gotator Install" "GOSUMDB=off GO111MODULE=off go get -u github.com/josderstad/gotator >/dev/null 2>&1"
-                if ! command -v gotator &>/dev/null; then
-                    ( rm -rf /tmp/gotator; git clone -q https://github.com/josderstad/gotator /tmp/gotator >/dev/null 2>&1; cd /tmp/gotator && GOSUMDB=off go build -o $HOME/go/bin/gotator main.go >/dev/null 2>&1 )
-                fi
-            fi
-        fi
-    done
-    
-    if [ ! -f "$CONF_DIR/.nuc_chk" ] || [ $(find "$CONF_DIR/.nuc_chk" -mtime +1) ]; then
-        if command -v nuclei &>/dev/null; then
-            run_with_spinner "Syncing Nuclei Templates" "nuclei -update-templates -silent >/dev/null 2>&1"
-            touch "$CONF_DIR/.nuc_chk"
-        fi
-    fi
-}
-
-# --- CONFIG ---
-init_conf() {
-    [ "$RESET" = true ] && rm -f "$CONF_FILE" && warn "Config reset."
-    if [ ! -f "$CONF_FILE" ]; then touch "$CONF_FILE"; fi
-    source "$CONF_FILE"
-    if [ -z "$NOTIFY_SERVICE" ]; then
-        if command -v gum &>/dev/null; then
-            if gum confirm "Configure Alerts?"; then
-                SVC=$(gum choose "Discord" "Slack" "Telegram")
-                echo "NOTIFY_SERVICE=\"$SVC\"" >> "$CONF_FILE"
-                case $SVC in
-                    Discord)  VAL=$(gum input --placeholder "Webhook" --password); echo "DISCORD_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
-                    Slack)    VAL=$(gum input --placeholder "Webhook" --password); echo "SLACK_WEBHOOK=\"$VAL\"" >> "$CONF_FILE" ;;
-                    Telegram) TOK=$(gum input --placeholder "Token" --password); ID=$(gum input --placeholder "ChatID"); echo "TELEGRAM_TOKEN=\"$TOK\"" >> "$CONF_FILE"; echo "TELEGRAM_CHATID=\"$ID\"" >> "$CONF_FILE" ;;
-                esac
-                notify "🔔 LeetEnum Configured."
-            else echo "NOTIFY_SERVICE=\"None\"" >> "$CONF_FILE"; fi
-        else echo "NOTIFY_SERVICE=\"None\"" >> "$CONF_FILE"; fi
-    fi
-}
-
-setup_cron() {
-    TGT=$1
-    if [ -z "$(crontab -l 2>/dev/null | grep "$SCRIPT_PATH" | grep "$TGT")" ]; then
-        if command -v gum &>/dev/null; then
-            if gum confirm "Add to Auto-Scheduler?"; then
-                D=$(gum input --placeholder "Days (e.g. 7)")
-                if [[ "$D" =~ ^[0-9]+$ ]]; then
-                    (crontab -l 2>/dev/null; echo "0 0 */$D * * $SCRIPT_PATH -d $TGT -m -no-tmux >> ${HOME}/leetsec_cron.log 2>&1") | crontab -
-                    notify "📅 $TGT monitored every $D days."
-                fi
-            fi
-        fi
-    fi
-}
-
-# --- CLI ---
-RESET=false; TARGET=""; MONITOR=false; NO_TMUX=false; DEEP_SCAN=false
-
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        -d|--domain) TARGET="$2"; shift ;;
-        -m|--monitor) MONITOR=true ;;
-        --reset) RESET=true ;;
-        --deep) DEEP_SCAN=true ;;
-        -no-tmux) NO_TMUX=true ;;
-        -up|-update) update_tool ;;
-        *) die "Usage: $0 -d target.com [-m] [--deep] [-update]" ;;
-    esac
-    shift
+    # shellcheck source=/dev/null
+    . "${LS_LIB}/${_m}.sh"
 done
+unset _m
 
-check_gear
-init_conf
-
-if [ -z "$TARGET" ]; then
-    banner
-    if command -v gum &>/dev/null; then
-        TARGET=$(gum input --placeholder "Target Domain")
-        if gum confirm "Enable Deep Port Scan (Slow)?"; then DEEP_SCAN=true; fi
-        if gum confirm "Differential Mode (Monitor)?"; then MONITOR=true; fi
-    else read -p "Target Domain: " TARGET; fi
+# ---------------------------------------------------------------------------
+# Bash version gate.
+#
+# macOS ships bash 3.2 from 2007 and that is a supported target, so the code
+# avoids associative arrays and `${var^^}` throughout. 3.2 is the real floor;
+# anything older lacks `printf -v` and cannot run the UI layer at all.
+# ---------------------------------------------------------------------------
+if [ -z "${BASH_VERSINFO[0]:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 3 ]; then
+    printf 'leetenum: bash 3.2 or newer required (found %s).\n' "${BASH_VERSION:-unknown}" >&2
+    exit 1
 fi
 
-[ -z "$TARGET" ] && die "Target required."
-TARGET=$(echo "$TARGET" | sed 's~http[s]*://~~g' | tr -d '/')
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+PIPE_ARG_TARGET=""
+PIPE_ARG_OUTROOT="${LEETENUM_OUTPUT_DIR:-$PWD}"
+PIPE_ARG_PROFILE="auto"
+PIPE_ARG_MONITOR="false"
+PIPE_ARG_DEEP="false"
+PIPE_ARG_FRESH="false"
+PIPE_ARG_ONLY=""
+PIPE_ARG_SKIP=""
+ARG_INTERVAL=21600          # 6h, used only in monitor mode
+ARG_TARGET_FILE=""
+ARG_YES="false"
 
-if [ -t 0 ] && [ "$NO_TMUX" = false ]; then
-    setup_cron "$TARGET"
-    SESS="leet_${TARGET//./_}"
-    if [ -z "$TMUX" ]; then
-        if tmux has-session -t "$SESS" 2>/dev/null; then
-            if command -v gum &>/dev/null; then gum confirm "Resume active session?" && tmux attach -t "$SESS" && exit 0; else tmux attach -t "$SESS" && exit 0; fi
+usage() {
+    cat <<'HELPTEXT_HEAD'
+LeetEnum - reconnaissance pipeline (LeetSecurity LLC)
+HELPTEXT_HEAD
+    printf 'Version %s\n' "$LEETENUM_VERSION"
+    cat <<'HELPTEXT'
+
+USAGE
+  leetenum <domain>                     scan a single target
+  leetenum scan -d <domain> [options]   same, explicit form
+  leetenum install                      install every dependency
+  leetenum doctor                       report environment and tool status
+  leetenum config                       reconfigure notifications
+  leetenum update                       update tools and templates
+  leetenum version
+
+SCAN OPTIONS
+  -d, --domain <domain>     target apex domain
+  -f, --file <path>         file of domains, one per line
+  -o, --output <dir>        output root (default: current directory)
+  -p, --profile <name>      lite | balanced | beast | auto   (default: auto)
+      --deep                include low and info severity findings
+      --fresh               ignore checkpoints and start over
+      --only <p1,p5>        run only these phases
+      --skip <p6,p9>       run everything except these phases
+  -m, --monitor             loop continuously, reporting only what is new
+      --interval <seconds>  monitor sleep between runs (default: 21600)
+  -y, --yes                 never prompt; assume defaults
+      --no-color            disable colour (NO_COLOR is also honoured)
+  -h, --help
+
+PHASES
+  p1 passive   p2 brute     p3 recursive   p4 permutations  p5 http
+  p6 ports     p7 crawl     p8 vulns       p9 screenshots
+
+EXAMPLES
+  leetenum example.com
+  leetenum scan -d example.com --profile beast --deep
+  leetenum scan -d example.com --only p5,p8      # re-probe and re-scan only
+  leetenum scan -f targets.txt -o ~/engagements
+  leetenum scan -d example.com --monitor --interval 3600
+
+ENVIRONMENT
+  LEETENUM_WORDLIST     override the DNS brute-force wordlist
+  LEETENUM_OUTPUT_DIR   default output root
+  LEETENUM_CONFIG_DIR   config location (default $XDG_CONFIG_HOME/leetsec)
+  LEETENUM_CACHE_DIR    cache location (default $XDG_CACHE_HOME/leetsec)
+  LEETENUM_UNPINNED=1   install tools at @latest instead of pinned versions
+  LEETENUM_FORCE=1      reinstall tools that are already present
+HELPTEXT
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+#
+# The original used a `while [[ $# -gt 0 ]]` loop that fell through unknown
+# flags silently, so `--profle beast` ran with the default profile and no
+# warning. Unknown options are now an error, and every option that takes a
+# value checks that the value exists rather than consuming the next flag.
+# ---------------------------------------------------------------------------
+arg_die() {
+    printf 'leetenum: %s\n' "$1" >&2
+    printf "Run 'leetenum --help'.\n" >&2
+    exit 2
+}
+
+# Validate in the current shell and assign separately. Doing this as
+# `VAR=$(need_value ...)` looks tidier but is broken: `exit` inside a command
+# substitution terminates only the subshell, so a trailing `-d` with no value
+# printed the error and then looped forever without ever consuming an argument.
+need_value() {
+    case "${2:-}" in
+        ''|-*) arg_die "$1 requires a value" ;;
+    esac
+    return 0
+}
+
+CMD=""
+parse_args() {
+    # A bare domain as the first argument is the common case and should just work.
+    case "${1:-}" in
+        scan|install|doctor|config|update|version|help) CMD="$1"; shift ;;
+        -h|--help)     CMD="help"; shift ;;
+        --version)     CMD="version"; shift ;;
+        -update)       CMD="update"; shift ;;      # v1 compatibility
+        --reset)       CMD="config"; shift ;;      # v1 compatibility
+        ''|-*)         CMD="scan" ;;
+        *)             CMD="scan"; PIPE_ARG_TARGET="$1"; shift ;;
+    esac
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -d|--domain)   need_value "$1" "${2:-}"; PIPE_ARG_TARGET="$2";  shift 2 ;;
+            -f|--file)     need_value "$1" "${2:-}"; ARG_TARGET_FILE="$2";  shift 2 ;;
+            -o|--output)   need_value "$1" "${2:-}"; PIPE_ARG_OUTROOT="$2"; shift 2 ;;
+            -p|--profile)  need_value "$1" "${2:-}"; PIPE_ARG_PROFILE="$2"; shift 2 ;;
+            --only)        need_value "$1" "${2:-}"; PIPE_ARG_ONLY="$2";    shift 2 ;;
+            --skip)        need_value "$1" "${2:-}"; PIPE_ARG_SKIP="$2";    shift 2 ;;
+            --interval)    need_value "$1" "${2:-}"; ARG_INTERVAL="$2";     shift 2 ;;
+            -m|--monitor)  PIPE_ARG_MONITOR="true"; shift ;;
+            --deep)        PIPE_ARG_DEEP="true"; shift ;;
+            --fresh)       PIPE_ARG_FRESH="true"; shift ;;
+            -y|--yes)      ARG_YES="true"; shift ;;
+            --no-color)    NO_COLOR=1; export NO_COLOR; shift ;;
+            -h|--help)     CMD="help"; shift ;;
+            --)            shift; break ;;
+            -*)            arg_die "unknown option $1" ;;
+            *)             [ -z "$PIPE_ARG_TARGET" ] && PIPE_ARG_TARGET="$1"; shift ;;
+        esac
+    done
+
+    case "$PIPE_ARG_PROFILE" in
+        lite|balanced|beast|auto) ;;
+        *) arg_die "profile must be lite, balanced, beast or auto" ;;
+    esac
+    printf '%s' "$ARG_INTERVAL" | grep -Eq '^[0-9]+$' \
+        || arg_die "--interval must be a whole number of seconds"
+    validate_phase_list --only "$PIPE_ARG_ONLY"
+    validate_phase_list --skip "$PIPE_ARG_SKIP"
+}
+
+# Catching `--only 6` or `--only phase6` here saves a user from a scan that
+# silently does nothing at all.
+validate_phase_list() {
+    local flag="$1" list="$2" item
+    [ -n "$list" ] || return 0
+    local IFS=','
+    for item in $list; do
+        case "$item" in
+            p1|p2|p3|p4|p5|p6|p7|p8|p9) ;;
+            *) arg_die "${flag}: ${item} is not a phase id (use p1..p9)" ;;
+        esac
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_scan() {
+    local targets=() t normalised rc=0
+
+    if [ -n "$ARG_TARGET_FILE" ]; then
+        [ -r "$ARG_TARGET_FILE" ] || ui_die "Cannot read ${ARG_TARGET_FILE}"
+        while IFS= read -r t || [ -n "$t" ]; do
+            t="${t%%#*}"                          # strip comments
+            t=$(printf '%s' "$t" | tr -d '[:space:]')
+            [ -n "$t" ] || continue
+            targets+=("$t")
+        done < "$ARG_TARGET_FILE"
+    elif [ -n "$PIPE_ARG_TARGET" ]; then
+        targets+=("$PIPE_ARG_TARGET")
+    fi
+
+    if [ "${#targets[@]}" -eq 0 ]; then
+        # Prompting beats exiting with a usage error when someone just typed the
+        # command name to see what it does.
+        if [ "$UI_STDOUT_TTY" = "true" ] && [ "$ARG_YES" != "true" ]; then
+            t=$(ui_ask "Target domain")
+            [ -n "$t" ] && targets+=("$t")
+        fi
+        [ "${#targets[@]}" -eq 0 ] && { usage; exit 2; }
+    fi
+
+    # Validate every target before starting, so a typo in entry 40 of a target
+    # file surfaces now instead of six hours in.
+    local valid=()
+    for t in "${targets[@]}"; do
+        if normalised=$(pipe_normalise_target "$t"); then
+            valid+=("$normalised")
         else
-            if command -v gum &>/dev/null; then
-                if gum confirm "Run in background (Tmux)?"; then
-                    tmux new-session -d -s "$SESS" "bash $SCRIPT_PATH -d $TARGET $( [ "$MONITOR" = true ] && echo "-m" ) $( [ "$DEEP_SCAN" = true ] && echo "--deep" ) -no-tmux; bash"
-                    tmux attach -t "$SESS"
-                    exit 0
-                fi
-            fi
+            ui_warn "Skipping invalid target: ${t}"
+        fi
+    done
+    [ "${#valid[@]}" -eq 0 ] && ui_die "No valid targets."
+
+    mkdir -p "$PIPE_ARG_OUTROOT" 2>/dev/null \
+        || ui_die "Cannot create output directory ${PIPE_ARG_OUTROOT}"
+    PIPE_ARG_OUTROOT=$(compat_realpath "$PIPE_ARG_OUTROOT")
+
+    deps_ensure_path
+    preflight || return 1
+    config_wizard
+
+    if [ "$PIPE_ARG_MONITOR" = "true" ]; then
+        monitor_loop "${valid[@]}"
+    else
+        for t in "${valid[@]}"; do
+            PIPE_ARG_TARGET="$t"
+            UI_START_TS=$(date +%s)
+            pipe_run || rc=1
+            pipe_cleanup_workdir
+        done
+    fi
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# Preflight
+#
+# Required tools are checked once, up front. The original checked inside each
+# phase and continued regardless, so a missing puredns produced a scan that ran
+# for twenty minutes and wrote nothing.
+# ---------------------------------------------------------------------------
+preflight() {
+    local missing=() b
+    for b in "${DEPS_REQUIRED[@]}"; do
+        command -v "$b" >/dev/null 2>&1 || missing+=("$b")
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        ui_err "Required tool(s) missing: ${missing[*]}"
+        if [ "$ARG_YES" = "true" ] || ui_confirm "Install dependencies now?" y; then
+            deps_install_all || return 1
+            for b in "${DEPS_REQUIRED[@]}"; do
+                command -v "$b" >/dev/null 2>&1 || ui_die "Still missing ${b}. See 'leetenum doctor'."
+            done
+        else
+            ui_info "Run 'leetenum install' when ready."
+            return 1
         fi
     fi
-fi
 
-TS=$(date +%Y%m%d_%H%M)
-BASE_DIR="$(pwd)/recon_${TARGET}"
-LAST_MASTER=""
-[ -L "${BASE_DIR}/latest" ] && LAST_MASTER=$(readlink -f "${BASE_DIR}/latest/master_dns.txt")
+    compat_online || ui_warn "No outbound connectivity detected; passive sources will fail."
+    return 0
+}
 
-if [ "$MONITOR" = true ]; then FINAL_DIR="${BASE_DIR}/${TS}"; info "Mode: MONITOR"; else
-    LAST_SCAN=$(ls -dt "$BASE_DIR"/*/ 2>/dev/null | head -1)
-    if [ -n "$LAST_SCAN" ]; then FINAL_DIR=${LAST_SCAN%/}; info "Resuming session."; else FINAL_DIR="${BASE_DIR}/${TS}"; fi
-fi
+# ---------------------------------------------------------------------------
+# Monitor mode
+#
+# Each iteration is a fresh run directory so the differential is meaningful.
+# Sleep is interruptible: the original slept in one long `sleep $INTERVAL`, and
+# Ctrl+C during it left the trap unable to reap children.
+# ---------------------------------------------------------------------------
+monitor_loop() {
+    local targets=("$@") t round=0
+    ui_info "Monitor mode: $(( ARG_INTERVAL / 60 )) minute interval. Ctrl+C to stop."
 
-WORK_DIR="/dev/shm/recon_${TARGET}_${TS}"
-RPT_DIR="${FINAL_DIR}/reports"
-LOCK_DIR="${FINAL_DIR}/.locks"
-mkdir -p "$WORK_DIR" "$FINAL_DIR" "$RPT_DIR" "$LOCK_DIR"
+    while true; do
+        round=$(( round + 1 ))
+        ui_hr
+        ui_emit "${C_ACCENT}${C_BOLD}Round ${round}${C_RESET} ${C_DIM}$(date '+%Y-%m-%d %H:%M:%S')${C_RESET}" \
+                "=== Round ${round} $(date '+%Y-%m-%d %H:%M:%S')"
 
-RAM=$(free -g | grep Mem: | awk '{print $2}')
-CORES=$(nproc)
-if [ "$RAM" -ge 60 ]; then PROF="LEET"; HTTPX=450; PUREDNS=500; NAABU=5000; LIMIT=50000; PARALLEL=50; SORT="-S 25G --parallel=${CORES}"
-elif [ "$RAM" -ge 16 ]; then PROF="PRO"; HTTPX=200; PUREDNS=200; NAABU=2500; LIMIT=20000; PARALLEL=15; SORT="-S 50% --parallel=${CORES}"
-else PROF="LITE"; HTTPX=80; PUREDNS=100; NAABU=1000; LIMIT=5000; PARALLEL=5; SORT="-S 50%"; fi
-JOB_LIMIT=$((LIMIT / PARALLEL))
+        for t in "${targets[@]}"; do
+            PIPE_ARG_TARGET="$t"
+            UI_START_TS=$(date +%s)
+            pipe_run
+            pipe_cleanup_workdir
+        done
 
-WL_BRUTE=~/brute_wordlist.txt
-WL_PERM=~/perm_words.txt
-WL_RES="${WORK_DIR}/resolvers.txt"
-[ ! -s "$WL_BRUTE" ] && wget -q https://wordlists-cdn.assetnote.io/data/manual/best-dns-wordlist.txt -O "$WL_BRUTE"
-[ ! -s "$WL_PERM" ] && wget -q https://raw.githubusercontent.com/m4ll0k/BBTz/master/perm_words.txt -O "$HOME/perm_words.txt"
-wget -q https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt -O "$WL_RES"
+        ui_info "Sleeping until $(monitor_next_time)"
+        local slept=0
+        while [ "$slept" -lt "$ARG_INTERVAL" ]; do
+            sleep 5
+            slept=$(( slept + 5 ))
+        done
+    done
+}
 
-notify "🚀 LeetEnum: $TARGET [$PROF]"
+# date arithmetic differs between GNU (`-d @epoch`) and BSD (`-r epoch`), so
+# probe rather than assume; falls back to a plain duration.
+monitor_next_time() {
+    local when=$(( $(date +%s) + ARG_INTERVAL ))
+    date -d "@${when}" '+%H:%M:%S' 2>/dev/null \
+        || date -r "$when" '+%H:%M:%S' 2>/dev/null \
+        || printf 'in %s' "$(ui_fmt_duration "$ARG_INTERVAL")"
+}
 
-# 1. PASSIVE
-if [ ! -f "$LOCK_DIR/p1" ]; then
-    phase_header "1" "Passive Intel"
-    AMASS_CMD="amass enum -passive -d '$TARGET' -o '$WORK_DIR/amass.txt'"
-    [ -f "$HOME/.config/amass/config.ini" ] && AMASS_CMD="$AMASS_CMD -config $HOME/.config/amass/config.ini"
-    
-    run_with_spinner "Running Amass" "timeout 15m $AMASS_CMD >/dev/null 2>&1 || true"
-    run_with_spinner "Running Subfinder" "subfinder -d '$TARGET' -all -silent > '$WORK_DIR/subfinder.txt'"
-    run_with_spinner "Running Assetfinder" "assetfinder --subs-only '$TARGET' > '$WORK_DIR/asset.txt'"
-    run_with_spinner "Mining CRT.SH" "curl -s 'https://crt.sh/?q=%25.$TARGET&output=json' | jq -r '.[].name_value' 2>/dev/null | sed 's/\*\.//g' | sort -u > '$WORK_DIR/crt.txt'"
-    run_with_spinner "Mining Wayback" "curl -s 'http://web.archive.org/cdx/search/cdx?url=*.$TARGET/*&output=text&fl=original&collapse=urlkey' | awk -F/ '{print \$3}' | sort -u > '$WORK_DIR/wayback.txt'"
-    
-    cat "$WORK_DIR"/*.txt 2>/dev/null | sort $SORT -u | grep -F ".$TARGET" > "$WORK_DIR/passive_raw.txt"
-    if [ -s "$WORK_DIR/passive_raw.txt" ]; then
-        run_with_spinner "Resolving Passive" "puredns resolve '$WORK_DIR/passive_raw.txt' -r '$WL_RES' -w '$WORK_DIR/passive_valid.txt' --rate-limit '$LIMIT' >/dev/null 2>&1"
-    fi
-    cp "$WORK_DIR/passive_valid.txt" "$FINAL_DIR/passive.txt" 2>/dev/null
-    print_count "Passive Found" "$WORK_DIR/passive_valid.txt"
-    touch "$LOCK_DIR/p1"
-else
-    cp "$FINAL_DIR/passive.txt" "$WORK_DIR/passive_valid.txt" 2>/dev/null
-fi
+cmd_install() {
+    ui_banner "$LEETENUM_VERSION" "Installing dependencies"
+    deps_install_all
+}
 
-# 2. BRUTE
-if [ ! -f "$LOCK_DIR/p2" ]; then
-    phase_header "2" "Active Brute Force"
-    run_with_spinner "Brute Forcing" "puredns bruteforce '$WL_BRUTE' '$TARGET' -r '$WL_RES' -w '$WORK_DIR/brute.txt' --rate-limit '$LIMIT' >/dev/null 2>&1"
-    cp "$WORK_DIR/brute.txt" "$FINAL_DIR/brute.txt" 2>/dev/null
-    print_count "Brute Force Found" "$WORK_DIR/brute.txt"
-    touch "$LOCK_DIR/p2"
-else
-    cp "$FINAL_DIR/brute.txt" "$WORK_DIR/brute.txt" 2>/dev/null
-fi
+cmd_doctor() {
+    ui_banner "$LEETENUM_VERSION" "Environment report"
+    deps_report
+}
 
-# 3. RECURSION
-if [ ! -f "$LOCK_DIR/p3" ]; then
-    cat "$WORK_DIR/passive_valid.txt" "$WORK_DIR/brute.txt" 2>/dev/null | sort $SORT -u > "$WORK_DIR/known.txt"
-    head -n 50000 "$WL_BRUTE" > "$WORK_DIR/rec_wl.txt"
-    awk -v t="$TARGET" -F. '{if (NF <= 5) print $0}' "$WORK_DIR/known.txt" | head -n 100000 > "$WORK_DIR/rec_targets.txt"
-    CNT=$(wc -l < "$WORK_DIR/rec_targets.txt")
-    if [ "$CNT" -gt 0 ]; then
-        phase_header "3" "Deep Scanning ($CNT targets)"
-        
-        do_rec() {
-            s=$1; w=$2; r=$3; o=$4; l=$5; h=$(echo "$s"|md5sum|cut -d' ' -f1)
-            puredns bruteforce "$w" "$s" -r "$r" -w "$o/r_$h.txt" --rate-limit "$l" >/dev/null 2>&1
-        }
-        export -f do_rec
-        
-        REC_CMD="cat $WORK_DIR/rec_targets.txt | xargs -P $PARALLEL -I {} bash -c 'do_rec \"{}\" \"$WORK_DIR/rec_wl.txt\" \"$WL_RES\" \"$WORK_DIR\" \"$JOB_LIMIT\"'"
-        
-        run_with_spinner "Brute Forcing $CNT targets ($PARALLEL threads)" "$REC_CMD"
+cmd_config() {
+    config_init_dirs
+    # Clearing the stored choice is what makes the wizard run again; the v1
+    # `--reset` deleted the whole config file including working webhooks.
+    config_wizard reset
+    ui_ok "Configuration saved to ${LS_CONF_FILE}"
+}
 
-        cat "$WORK_DIR"/r_*.txt >> "$WORK_DIR/recursive.txt" 2>/dev/null
-        rm "$WORK_DIR"/r_*.txt 2>/dev/null
-    fi
-    cp "$WORK_DIR/recursive.txt" "$FINAL_DIR/recursive.txt" 2>/dev/null
-    print_count "Recursive Found" "$WORK_DIR/recursive.txt"
-    touch "$LOCK_DIR/p3"
-else
-    cp "$FINAL_DIR/recursive.txt" "$WORK_DIR/recursive.txt" 2>/dev/null
-fi
+cmd_update() {
+    ui_banner "$LEETENUM_VERSION" "Updating toolchain"
+    config_init_dirs
+    LEETENUM_FORCE=1 deps_install_go_tools
+    deps_sync_templates
+    # Force a wordlist refresh by clearing the cache stamps.
+    rm -f "${LS_CACHE_DIR}/wordlists/resolvers.txt" 2>/dev/null || true
+    LOG_DIR="${LS_CACHE_DIR}" pipe_prepare_wordlists
+    ui_ok "Toolchain, templates and wordlists updated"
+}
 
-# 4. PERMS
-if [ ! -f "$LOCK_DIR/p4" ]; then
-    phase_header "4" "Permutations"
-    cat "$WORK_DIR/known.txt" "$WORK_DIR/recursive.txt" 2>/dev/null | sort $SORT -u > "$WORK_DIR/seeds.txt"
-    S_CNT=$(wc -l < "$WORK_DIR/seeds.txt")
-    if [ "$S_CNT" -gt 0 ]; then
-        [ "$S_CNT" -gt 50000 ] && head -n 50000 "$WORK_DIR/seeds.txt" > "$WORK_DIR/gotator_seeds.txt" || cp "$WORK_DIR/seeds.txt" "$WORK_DIR/gotator_seeds.txt"
-        if command -v gotator >/dev/null; then
-             run_with_spinner "Generating Perms" "timeout 60m gotator -sub '$WORK_DIR/gotator_seeds.txt' -perm '$WL_PERM' -depth 1 -silent > '$WORK_DIR/perms_raw.txt' 2>/dev/null"
-             if [ -s "$WORK_DIR/perms_raw.txt" ]; then
-                 run_with_spinner "Resolving Perms" "puredns resolve '$WORK_DIR/perms_raw.txt' -r '$WL_RES' -w '$WORK_DIR/perms_valid.txt' --rate-limit '$LIMIT' >/dev/null 2>&1"
-             fi
-        fi
-    fi
-    cp "$WORK_DIR/perms_valid.txt" "$FINAL_DIR/perms.txt" 2>/dev/null
-    print_count "Permutations Found" "$WORK_DIR/perms_valid.txt"
-    touch "$LOCK_DIR/p4"
-else
-    cp "$FINAL_DIR/perms.txt" "$WORK_DIR/perms_valid.txt" 2>/dev/null
-fi
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
+main() {
+    compat_init
+    ui_init
+    ui_install_traps
+    config_init_dirs
 
-# MERGE
-cat "$WORK_DIR/seeds.txt" "$WORK_DIR/perms_valid.txt" 2>/dev/null | sort $SORT -u | grep "$TARGET" > "$WORK_DIR/master.txt"
-cp "$WORK_DIR/master.txt" "$FINAL_DIR/master_dns.txt" 2>/dev/null
+    parse_args "$@"
 
-# 5. TAKEOVER (DNS Level)
-info "Phase 5: Subdomain Takeover Check (DNS)"
-if command -v nuclei >/dev/null; then
-    run_with_spinner "Checking Takeovers" "nuclei -l '$WORK_DIR/master.txt' -tags takeover -o '$RPT_DIR/dns_takeovers.txt' -silent | tee -a '$RPT_DIR/nuclei.txt'"
-fi
+    case "$CMD" in
+        help)    usage; return 0 ;;
+        version) printf 'leetenum %s (%s/%s)\n' "$LEETENUM_VERSION" "$LS_OS" "$LS_ARCH"; return 0 ;;
+    esac
 
-NEW_CNT=0
-if [ "$MONITOR" = true ] && [ -f "$LAST_MASTER" ]; then
-    sort $SORT -u "$LAST_MASTER" > "$WORK_DIR/old.txt"
-    sort $SORT -u "$WORK_DIR/master.txt" > "$WORK_DIR/new.txt"
-    comm -13 "$WORK_DIR/old.txt" "$WORK_DIR/new.txt" > "$FINAL_DIR/new_subs.txt"
-    NEW_CNT=$(wc -l < "$FINAL_DIR/new_subs.txt")
-    [ "$NEW_CNT" -gt 0 ] && notify "🚨 MONITOR: Found $NEW_CNT NEW subdomains!"
-fi
+    case "$CMD" in
+        install) cmd_install ;;
+        doctor)  cmd_doctor ;;
+        config)  cmd_config ;;
+        update)  cmd_update ;;
+        scan)
+            ui_banner "$LEETENUM_VERSION" \
+                "$([ "$PIPE_ARG_MONITOR" = true ] && printf 'continuous monitoring' \
+                                                  || printf 'single-pass scan')"
+            cmd_scan
+            ;;
+        *)       usage; return 2 ;;
+    esac
+}
 
-# 6. PORTS
-phase_header "6" "Omni-Port & HTTP"
-if [ -s "$WORK_DIR/master.txt" ]; then
-    if [ "$DEEP_SCAN" = true ]; then PORTS="-p 1-10000"; warn "DEEP SCAN enabled."; else PORTS="-top-ports 1000"; fi
-    
-    # ADDED: -exclude-cdn logic for speed
-    run_with_spinner "Port Scanning" "naabu -l '$WORK_DIR/master.txt' -rate '$NAABU' $PORTS -exclude-cdn -silent -o '$WORK_DIR/ports.txt' >/dev/null 2>&1"
-    [ -s "$WORK_DIR/ports.txt" ] && T_LIST="$WORK_DIR/ports.txt" || T_LIST="$WORK_DIR/master.txt"
-    
-    run_with_spinner "HTTP Probing" "httpx -l '$T_LIST' -threads '$HTTPX' -random-agent -retries 2 -timeout 10 -sc -title -tech-detect -ip -cname -server -o '$FINAL_DIR/http_full.txt' -silent > /dev/null 2>&1"
-    awk '{print $1}' "$FINAL_DIR/http_full.txt" | sort $SORT -u > "$WORK_DIR/live.txt"
-    grep "\[200\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/200.txt"
-    grep "\[403\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/403.txt"
-    grep "\[404\]" "$FINAL_DIR/http_full.txt" > "$FINAL_DIR/404.txt"
-    cp "$WORK_DIR/live.txt" "$FINAL_DIR/live_urls.txt"
-    print_count "Live Websites" "$WORK_DIR/live.txt"
-fi
-
-# 7. VISUALS
-phase_header "7" "Visuals (Screenshots)"
-if [ -s "$WORK_DIR/live.txt" ]; then
-    if command -v gowitness &>/dev/null; then
-        mkdir -p "$FINAL_DIR/screenshots"
-        run_with_spinner "Taking Screenshots" "gowitness scan file -f '$WORK_DIR/live.txt' -s '$FINAL_DIR/screenshots/' --threads 10 --no-http --chrome-arg='--no-sandbox' --chrome-arg='--disable-gpu' > '$RPT_DIR/gowitness.log' 2>&1"
-    fi
-fi
-
-# 8. VULNS
-phase_header "8" "Deep Vulnerability Scan"
-if [ -s "$WORK_DIR/live.txt" ]; then
-    if command -v katana &>/dev/null; then
-        run_with_spinner "Spidering JS" "katana -list '$WORK_DIR/live.txt' -jc -kf -c 20 -d 2 -silent 2>/dev/null | grep '$TARGET' | sort $SORT -u > '$WORK_DIR/spider.txt'"
-        if [ -s "$WORK_DIR/spider.txt" ]; then
-             puredns resolve "$WORK_DIR/spider.txt" -r "$WL_RES" -w "$WORK_DIR/spider_val.txt" --rate-limit "$LIMIT" >/dev/null 2>&1
-             cat "$WORK_DIR/spider_val.txt" >> "$FINAL_DIR/master_dns.txt"
-        fi
-    fi
-    
-    if command -v nuclei &>/dev/null; then
-        echo -e "${C}    -> Running Nuclei (Streaming criticals)...${NC}"
-        # Added 'cve' and 'misconfig' for MSRC compliance
-        nuclei -l "$WORK_DIR/live.txt" \
-            -tags takeover,exposure,config,keys,cloud,cve,misconfig \
-            -severity low,medium,high,critical \
-            -timeout 10 -retries 2 \
-            -silent | tee -a "$RPT_DIR/nuclei.txt" | grep --line-buffered -iE "medium|high|critical"
-    fi
-fi
-
-# RAM CLEANUP
-echo -e "${Y}[*] Cleaning RAM...${NC}"
-rm -rf "$WORK_DIR/amass.txt" "$WORK_DIR/crt.txt" "$WORK_DIR/wayback.txt" "$WORK_DIR/subfinder.txt"
-
-# --- REPORT ---
-rm -rf "${BASE_DIR}/latest"; ln -s "${FINAL_DIR}" "${BASE_DIR}/latest"
-DNS=$(wc -l < "$FINAL_DIR/master_dns.txt")
-VULN=$(wc -l < "$RPT_DIR/nuclei.txt")
-LIVE=$(wc -l < "$WORK_DIR/live.txt")
-
-show_completion "$TARGET" "$DNS" "$VULN" "$FINAL_DIR"
-
-notify "✅ LeetEnum: $TARGET | Subs: $DNS | Vulns: $VULN"
+main "$@"

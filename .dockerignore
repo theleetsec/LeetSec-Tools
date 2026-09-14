@@ -1,0 +1,17 @@
+# Only leetenum.sh, lib/ and the deps list are needed to build the image.
+# Everything else here either bloats the build context or invalidates the layer
+# cache on every commit.
+.git
+.gitignore
+.github
+tests
+docs
+*.md
+!README.md
+LICENSE
+Dockerfile
+.dockerignore
+install.sh
+packaging
+recon_*
+*.log

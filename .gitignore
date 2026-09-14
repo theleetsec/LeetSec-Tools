@@ -1,0 +1,13 @@
+# Scan output. LeetEnum writes recon_<target>/ into the working directory, and a
+# results tree committed by accident is both a large diff and, more often than
+# not, a client's asset list in a public repository.
+recon_*/
+latest
+*.log
+
+# Go build output and local tooling.
+/leetenum
+*.test
+*.out
+.DS_Store
+.claude/

@@ -1,162 +1,342 @@
-# 🚩 LeetEnum (v1.0 Apex Edition)
+# LeetEnum v1.0.0
 
-**Property of LeetSecurity LLC | Developed by sudoaman**
+[![CI](https://github.com/theleetsec/LeetSec-Tools/actions/workflows/ci.yml/badge.svg)](https://github.com/theleetsec/LeetSec-Tools/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/theleetsec/LeetSec-Tools?sort=semver)](https://github.com/theleetsec/LeetSec-Tools/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/theleetsec/LeetSec-Tools)](https://github.com/theleetsec/LeetSec-Tools/stargazers)
 
-![Bash](https://img.shields.io/badge/Language-Bash-green?style=flat-square)
-![Platform](https://img.shields.io/badge/Platform-Linux-black?style=flat-square)
-![License](https://img.shields.io/badge/License-LeetSec-red?style=flat-square)
+Reconnaissance pipeline for authorised security assessments, by LeetSecurity LLC.
 
-## 👋 Namaste! What is LeetEnum?
+This is the actively maintained v1 line. The existing repository is preserved so
+its community stars and forks remain attached to the project.
 
-**LeetEnum** is a high-performance, fully automated reconnaissance engine designed for Bug Bounty Hunters and Red Teamers who want results, not headaches.
+## Features
 
-We know the struggle of running `subfinder`, then sorting files, then running `httpx`, then `nuclei` one by one... it is a big headache and takes too much time.
+- 12 parallel passive discovery sources, with DNS records, certificate names, and
+  public archive lookups
+- Tiered DNS brute force, recursive brute force, and gotator permutations
+- Resolver health checks, scope filtering, atomic artifacts, and resumable checkpoints
+- RAM/CPU auto-tuning with `lite`, `balanced`, and `beast` profiles
+- Structured JSONL HTTP and vulnerability output plus Markdown reports
+- Nine phases, selected-phase reruns, differential reports, monitor mode, and a
+  Bash 3.2 compatible implementation
 
-**LeetEnum solves this problem.** You just give it a domain name, and it handles the entire kill chain automatically. It is built to be a **"Set and Forget"** tool. You run the command, go sleep or watch a movie, and get a notification on your phone when the hacking is done.
+The former dedicated subdomain takeover phase was removed. Nuclei is run with the
+`takeover` template tag excluded.
 
-It is built to be **Smart**. It checks your RAM and CPU before starting. If you have a small laptop, it runs gently (Potato Mode). If you have a big Cloud VPS (like Azure/AWS), it runs in **Beast Mode** (50x Parallelism) and finishes the job very fast.
+## Daily use — subdomain hunt
 
----
-
-## 🔥 Why use this tool? (Key Features)
-
-1.  **🧠 Smart Auto-Scaling (No Lag)**
-    The tool automatically checks your PC/VPS specifications (RAM & CPU).
-    * If you have a **small laptop (4GB RAM)**, it runs gently (Potato Mode).
-    * If you have a **big VPS (64GB+ RAM)**, it goes full **Beast Mode** and hammers the target.
-
-2.  **👀 Monitor Mode (The Hunter)**
-    Run the tool today on `target.com`. Run it again after 7 days.
-    The tool will compare the results and tell you **only the NEW subdomains** that appeared. This is best for finding fresh bugs before anyone else.
-
-3.  **💀 DNS Takeover Detection**
-    Most tools miss this. LeetEnum checks for Subdomain Takeovers on **all** resolved domains, even the ones that don't have a web server running.
-
-4.  **⚡ CDN Exclusion (Smart Scanning)**
-    It automatically skips port scanning on Cloudflare/Akamai IPs to save time and avoid bans.
-
-5.  **🔄 Self-Updating**
-    Never use an old version. Just run `./leetenum.sh -update` and it will pull the latest code and features from the LeetSec repository automatically.
-
-6.  **⏸️ Smart Resume (Peace of Mind)**
-    Internet disconnected? Server restarted? **No tension.**
-    Just run the script again. It remembers exactly where it stopped (using checkpoint files) and continues from there. It won't waste time doing the same work twice.
-
-7.  **🔔 Instant Alerts**
-    Get a notification on your phone (**Telegram, Discord, or Slack**) the moment a scan finishes or if a critical vulnerability is found.
-
-8.  **📸 Visual Recon**
-    It automatically takes screenshots of all live websites using `gowitness`. You can browse them later to spot Admin Panels easily.
-
-9.  **🛡️ Auto-Installation (Universal)**
-    You don't need to manually install tools. The script detects your OS (Kali, Ubuntu, Arch, etc.) and installs missing dependencies like `puredns`, `massdns`, or `nuclei` automatically.
-
----
-
-## 🚀 Installation Guide
-
-It is very simple to install. Just open your terminal and run these commands one by one:
-
-**Step 1: Download the tool**
-```bash
-git clone https://github.com/theleetsec/LeetSec-Tools.git
-cd LeetSec-Tools
-
+```sh
+leetenum example.com --subs
 ```
 
-**Step 2: Give permission**
+That is the one command. It runs every **free** source that actually finds names
+(subfinder, assetfinder, amass, findomain if present, crt.sh, Wayback, HackerTarget,
+RapidDNS, AlienVault OTX, Anubis, Cert Spotter, ThreatMiner, urlscan, DNS NS/MX/TXT/SPF,
+AXFR, brute, recursive brute, permutations, HTTP, TLS SAN/CN, katana, waybackurls, gau)
+then **deepens** one label further so `api.internal.staging.example.com` can appear
+after `internal.staging.example.com` is known.
 
-```bash
-chmod +x leetenum.sh
+`--subs` skips ports, nuclei and screenshots. Drop it for the full nine-phase pipeline.
 
-```
-
-**Step 3: First Time Setup**
-This will install all necessary tools and help you set up your Notification Webhooks.
-
-```bash
-./leetenum.sh --reset
+The live line while it works:
 
 ```
-
-*(Note: If the script asks for a password, it is installing system dependencies like massdns or chromium)*
-
----
-
-## 🛠️ How to Use
-
-### 1️⃣ Basic Scan (Start Here)
-
-Best for scanning a single website or domain for the first time.
-
-```bash
-./leetenum.sh -d target.com
-
+  leetenum  1.0.0   reconnaissance pipeline
+  ·•◦•·•◦•·•◦•·•◦•
+  ⠋ passive APIs (crt.sh, wayback, otx, …)  12s   names 1402  resolved 0  live 0
 ```
 
-### 2️⃣ Monitor Mode (Find New Subdomains)
+LeetEnum runs nine phases against one apex domain — passive intelligence, DNS brute
+force, recursive brute force, permutations, HTTP probing, port
+scanning, crawling, vulnerability scanning and screenshots — and writes a report you
+can hand to a client. It orchestrates well-known tools (subfinder, puredns, httpx,
+naabu, katana, nuclei and others) rather than reimplementing them, so the value is in
+the sequencing, the scope discipline, the budgets and the fact that an interrupted
+run resumes instead of starting over.
 
-Use this if you have already scanned the target before and want to check for **new changes**.
+Only scan systems you are authorised to test. Every phase in this pipeline generates
+traffic that is attributable to you.
 
-```bash
-./leetenum.sh -d target.com -m
+See [docs/technical-guide.md](docs/technical-guide.md) for phase inputs, state
+transitions, safety boundaries, and validation limits.
 
+## Install
+
+Four paths. Pick one; they all end up with `leetenum` on your `PATH`.
+
+**Standalone binary** — no runtime, no dependencies, one file. Replace the platform
+suffix with `linux_arm64`, `darwin_amd64` or `darwin_arm64` as needed.
+
+```sh
+v=1.0.0
+curl -fsSLO "https://github.com/theleetsec/LeetSec-Tools/releases/download/v${v}/leetenum_${v}_linux_amd64.tar.gz"
+curl -fsSLO "https://github.com/theleetsec/LeetSec-Tools/releases/download/v${v}/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS
+# macOS: grep "_darwin_arm64.tar.gz$" SHA256SUMS | shasum -a 256 -c -
+tar -xzf "leetenum_${v}_linux_amd64.tar.gz"
+sudo install "leetenum_${v}_linux_amd64/leetenum" /usr/local/bin/
 ```
 
-### 3️⃣ Deep Scan (Slow but Thorough)
+**One-line installer** — installs the shell implementation and then fetches the recon
+toolchain for you.
 
-By default, the tool scans the Top 1,000 ports for speed. Use this if you want to scan **ports 1-10,000** to find hidden services.
-
-```bash
-./leetenum.sh -d target.com --deep
-
+```sh
+curl -fsSL https://raw.githubusercontent.com/theleetsec/LeetSec-Tools/main/install.sh | sh
 ```
 
-### 4️⃣ Background Mode (Recommended for VPS)
+It takes `--prefix`, `--bin`, `--ref`, `--tarball` (for air-gapped hosts),
+`--no-tools` and `--uninstall`. Read it before you pipe it to a shell; it is POSIX
+`sh` on purpose and it is short.
 
-If you are scanning a big target like `microsoft.com` or `google.com`, the script will automatically ask if you want to run in **Tmux**. Say **Yes**.
-This keeps the scan running safely in the background even if you close your terminal.
+**Homebrew**, on macOS or Linuxbrew:
 
-### 5️⃣ Update the Tool
-
-To get the latest version and bug fixes instantly:
-
-```bash
-./leetenum.sh -update
-
+```sh
+brew tap theleetsec/tap
+brew install leetenum
 ```
 
-### 6️⃣ Reset Configuration
+**Container**, which is also the supported way to run on Windows:
 
-If you want to change your API keys or Telegram/Discord settings later.
-
-```bash
-./leetenum.sh --reset
-
+```sh
+docker run --rm -v "$PWD:/work" ghcr.io/theleetsec/leetenum example.com
 ```
 
----
+The `full` tag adds Chromium so phase 9 produces screenshots. Results land in the
+current directory because `/work` is the image's working directory and its volume.
 
-## 📂 Output Files (Where is my data?)
+### Then the toolchain
 
-All your results are saved nicely in the `recon_<target>/<timestamp>/` folder.
+The binary and the container are self-contained, but the recon tools themselves are
+separate programs. Install them once:
 
-| File Name | What is inside? |
-| --- | --- |
-| **REPORT.md** | A clean summary of the whole scan (Open this first). |
-| **master_dns.txt** | A huge list of every subdomain found. |
-| **live.txt** | List of all working websites (HTTP/HTTPS). |
-| **dns_takeovers.txt** | Potential subdomain takeovers (CNAME issues). |
-| **screenshots/** | Folder containing images of all the websites. |
-| **reports/nuclei.txt** | List of vulnerabilities found. |
-| **new_subs.txt** | (Monitor Mode Only) List of newly discovered domains. |
+```sh
+leetenum install     # 12 pinned Go tools plus massdns
+leetenum doctor      # what is present, what is missing, what this machine can do
+```
 
----
+`doctor` exits non-zero when a required tool is absent, so it works as a CI gate.
+Optional tools are reported as optional and their phases degrade with a warning
+rather than failing the run.
 
-## ⚠️ Disclaimer
+## Use
 
-**This tool is created by Sudoaman (LeetSec) for Educational and Ethical Hacking purposes only.**
+```sh
+leetenum example.com --subs                       # all subdomain sources, then stop
+leetenum example.com                              # everything, machine-sized
+leetenum example.com --profile beast --deep       # more concurrency, low+info findings
+leetenum scan -d example.com --only p5,p8         # re-probe and re-scan, nothing else
+leetenum scan -d example.com --skip p6,p9         # no port scan, no screenshots
+leetenum scan -f targets.txt -o ~/engagements     # a file of domains
+leetenum scan -d example.com --monitor            # loop, report only what is new
+leetenum example.com --dry-run                    # print the commands, run nothing
+```
 
-Please do not use this tool on websites where you do not have written permission. The author is not responsible for any misuse or damage caused by this tool.
+An interrupted scan resumes: run the same command again and it continues from the
+phase it stopped in. `--fresh` starts over instead.
 
-**Happy Hunting! 🎯**
+## Phases
+
+| id | phase | tools | bounded at |
+|----|-------|-------|-----------|
+| p1 | Passive intel | subfinder, assetfinder, amass, crt.sh | amass 10m |
+| p2 | Brute force | puredns + massdns | — |
+| p3 | Recursive brute force | puredns, per-parent worker pool | — |
+| p4 | Permutations | gotator + puredns | gotator 30m |
+| p5 | HTTP probing | httpx | — |
+| p6 | Port scanning | naabu, then httpx on what it finds | — |
+| p7 | Crawling | katana, waybackurls | katana 45m, wayback 10m |
+| p8 | Vulnerability scan | nuclei | — |
+| p9 | Screenshots | gowitness + Chromium | 30m |
+
+Phases select each other's output from disk, not from memory, which is why `--only`
+and resume produce the same results as a clean run. Phase 7 feeds hostnames back into
+the master list: names that appear only in a JavaScript bundle, a CSP header or a
+redirect chain are never seen by DNS enumeration.
+
+The bounded phases exist because recon tools have no natural end. amass on a large
+target and katana on a single-page app will both run until something stops them, and
+hitting a budget is treated as success with partial output, not as a failure.
+
+## Profiles
+
+`--profile auto` is the default and sizes the run from the machine's cores and memory.
+Force one when you know better.
+
+| profile | picked when | DNS/s | httpx threads | recursion fanout | naabu/s |
+|---------|-------------|-------|---------------|------------------|---------|
+| lite | anything smaller | 1000 | 40 | 2 | 500 |
+| balanced | ≥ 7 GB RAM and ≥ 4 cores | 5000 | 120 | cores | 1500 |
+| beast | ≥ 32 GB RAM and ≥ 8 cores | 15000 | 300 | cores × 2 | 3000 |
+
+The DNS rate is a total, not a per-worker figure: it is divided by the fanout before
+the workers start, with a floor of 50/s each. Multiplying instead of dividing is how
+the original saturated its resolvers, and a resolver dropping queries looks exactly
+like a target with no subdomains.
+
+## Output
+
+```
+recon_example.com/
+├── latest -> 20260901_140322          symlink, or latest.txt where symlinks fail
+└── 20260901_140322/
+    ├── 01_passive.txt   02_brute.txt   03_recursive.txt   04_perms.txt
+    ├── 05_live_urls.txt 05_http.jsonl  06_ports.txt       06_extra_urls.txt
+    ├── 07_urls.txt      07_crawled_hosts.txt
+    ├── master_dns.txt                 every in-scope hostname found
+    ├── master_live_urls.txt           every live HTTP service
+    ├── reports/
+    │   ├── summary.md                 the file to read first
+    │   ├── new_since_last_run.txt     differential against the last complete run
+    │   ├── nuclei.txt   nuclei.jsonl
+    │   └── screenshots/
+    ├── logs/                          one log per tool, plus leetenum.log
+    └── .state/                        phase checkpoints
+```
+
+Every artifact is lowercase, deduplicated, byte-sorted, and filtered to the target's
+scope on the way in — a name a third-party source volunteered outside the engagement
+cannot reach a client report, however it arrived. Writes are atomic, so a killed run
+never leaves a half-written list. Empty and absent mean the same thing to every reader,
+which is what lets a skipped phase leave downstream phases unchanged.
+
+`logs/leetenum.log` is the terminal transcript with the colour stripped and timestamps
+added. It is the file to attach to a report.
+
+## Resume and differential reporting
+
+A phase is marked complete only when it succeeds. Interrupt a run at hour six and the
+five phases before it stay done; the phase that was in flight is retried. A run is
+marked complete only when every phase was either run or deliberately skipped, and that
+marker does two things: it stops the next invocation resuming into the directory, and
+it makes the run eligible as a differential baseline.
+
+`reports/new_since_last_run.txt` is this run's master list minus the newest previously
+*completed* run's. Comparing against an incomplete run would report hosts as new
+because the earlier run never got to them, so incomplete runs are never used as a
+baseline. With `--monitor`, that file is the whole point: each pass reports only what
+changed.
+
+## Platforms
+
+Linux and macOS are both first-class, on x86_64 and arm64. Windows is supported
+through WSL2 or the container, which is a deliberate choice: serving Windows natively
+would mean maintaining a second set of process and filesystem code for a platform where
+most of the underlying recon tools are not tested anyway.
+
+macOS is the harder target of the two and the shell implementation is written for it
+specifically. `/bin/bash` on macOS is 3.2, so there are no associative arrays, no
+`${var^^}`, no `mapfile`. The userland is BSD, so `sort --parallel`, `sed -i` without
+an argument, `readlink -f`, `nproc`, `free`, `md5sum` and `timeout` are all either
+absent or differently spelled. Every one of those goes through a shim in
+`lib/compat.sh`, and CI fails the build if a bare call to any of them reappears at a
+call site. `timeout` is the instructive one: it does not exist on macOS at all, so all
+the bounded phases used to produce nothing there while reporting only that their tool
+had failed. It is now a shell watchdog when no binary is available, and `leetenum
+doctor` tells you which mechanism is in use.
+
+Low-spec hosts are handled by the `lite` profile and by treating scratch space as an
+optimisation. If there is no usable tmpfs, work goes into the run directory instead of
+failing, and nothing a resume depends on is ever written to scratch.
+
+## Two implementations
+
+The repository contains both, at the same version, producing the same artifacts with
+the same names.
+
+`leetenum.sh` with `lib/` is the shell implementation: what the installer and the
+Homebrew formula give you, and what the container runs. It additionally has `config`
+for the notification wizard and `-y/--yes` for unattended runs.
+
+`cmd/leetenum` with `internal/` is a Go rewrite of the same pipeline, and is what the
+release tarballs contain. It is standard library only — no cobra, no lipgloss, and CI
+enforces that the dependency tree stays empty — and it is built with `CGO_ENABLED=0`
+so the binary is genuinely static. That is what makes "download one file and run it"
+true rather than aspirational. It adds `--wordlist`, `--offline` and `--dry-run`, and
+its `--interval` takes a duration (`90m`, `6h`) where the shell version takes seconds.
+
+Either is a complete tool. The Go build exists for the install story; the shell build
+exists because a pipeline of shell tools is easy to read, patch and audit on a host
+you have just been given access to.
+
+## Configuration
+
+Nothing needs configuring to run a scan. Notifications and cached wordlists are the
+only state, and both live under XDG paths.
+
+| variable | effect |
+|----------|--------|
+| `LEETENUM_OUTPUT_DIR` | default output root |
+| `LEETENUM_WORDLIST` | default DNS brute-force wordlist |
+| `LEETENUM_PERM_WORDLIST` | permutation seed list, replacing the built-in one |
+| `LEETENUM_CONFIG_DIR` | config location, default `$XDG_CONFIG_HOME/leetsec` |
+| `LEETENUM_CACHE_DIR` | cache location, default `$XDG_CACHE_HOME/leetsec` |
+| `LEETENUM_FORCE=1` | `install` reinstalls tools already present |
+| `LEETENUM_UNPINNED=1` | `update` installs `@latest` instead of the pinned versions |
+| `CHROME_PATH` | browser to use for screenshots |
+| `NO_COLOR` | disable colour, as does `--no-color` |
+
+Tool versions are pinned, and `update` reinstalls at those pins. `LEETENUM_UNPINNED=1`
+exists for when you need a fix that is only on `main`, not as a default, because an
+unpinned toolchain means two runs a week apart are not comparable.
+
+The DNS wordlist and the resolver list are downloaded and cached — resolvers daily,
+since a dead resolver poisons every result that depends on it, and the wordlist
+monthly. The permutation seed list is not: it is built into both implementations, small
+and deliberately so, because gotator's output grows multiplicatively with it. Point
+`LEETENUM_PERM_WORDLIST` at your own file to replace it. A download that fails leaves
+the cached copy in place rather than truncating it, and a run with no network uses
+whatever is cached and says what it is missing.
+
+Exit codes: 0 success, 1 error, 2 bad usage, 130 interrupted. A first Ctrl-C cancels
+the run and leaves it resumable; a second exits immediately.
+
+## How this is tested
+
+```sh
+bash tests/run.sh          # fixture suite, no network or recon tools required
+```
+
+The suite parses every shell file, unit-tests the portability shims, replays the
+command-injection strings that reached `eval` in v1 against the target validator, and
+then runs the whole pipeline against a stand-in toolchain to check the parts that are
+easy to get wrong: that a resumed run loses no hosts and does not create a second
+directory, that `--only` re-runs the phase you named and leaves the other checkpoints
+alone, and that the differential excludes previously-known hosts. It also diffs the
+built-in permutation wordlist against the Go copy of the same list, since the two
+implementations ship at one version and are only the same tool if they enumerate the
+same candidates.
+
+CI runs it on ubuntu-latest, ubuntu-22.04, macos-14 (arm64) and macos-15-intel (x86_64), and
+asserts on the macOS runners that it is testing the system `/bin/bash` 3.2 and the BSD
+userland rather than quietly picking up Homebrew's bash and GNU coreutils — which would
+make the whole macOS matrix meaningless. shellcheck runs at `-S warning` over the bash
+sources and in `-s sh` mode over the installer. The Go side is gofmt-checked, vetted,
+tested with `-race -count=1`, checked for an empty dependency tree, made to reject five
+specific bad invocations, and then walked end to end under `--dry-run --offline` to
+assert the artifact set, the plain-text transcript, and both halves of the resume
+contract. The linux/amd64 release binary is checked with `file` for static linkage,
+because a dynamically linked artifact would silently break the one-file install claim.
+
+### What the tests do not cover
+
+Worth knowing before you trust a green build.
+
+The recon tools are never actually executed by the suite. Every pipeline test uses a
+stand-in toolchain or `--dry-run`, so what is verified is the orchestration — sequencing,
+scope filtering, artifact handling, resume, budgets — and not the parsing of any real
+tool's real output. A tool changing its output format is a class of breakage these
+tests will not catch.
+
+The container image and the Homebrew formula are built and installed only by CI on
+release; neither has a test that runs on every commit. The installer's download path is
+exercised against a local tarball rather than `codeload.github.com`, so a change in
+GitHub's archive behaviour would not be caught until someone ran the one-liner. And
+macOS bash 3.2 compatibility is enforced by the CI matrix, not by any local check — a
+3.2-incompatible construct will not be noticed until CI runs it.
+
+## License
+
+MIT. Property of LeetSecurity LLC.
+
+Use this only against systems you own or have written authorisation to test.

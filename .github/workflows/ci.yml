@@ -1,0 +1,682 @@
+name: ci
+
+# Every push and PR runs the same suite the maintainers run locally, on the
+# three platforms LeetEnum claims to support. The macOS job is the one that
+# matters most: it is the only place bash 3.2 and the BSD userland get exercised,
+# and every portability bug this rewrite fixed would have been caught there.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A CR in a shell script is not a style problem. bash treats \r as part of
+      # the token, so `get_flex() {\r` is a syntax error and the interpreter dies
+      # before defining a single function — which is exactly what shipped: the
+      # published leetenum.sh carried 566 CRs and no argument parsing ever ran on
+      # any platform. .gitattributes normalises on the way in; this is the guard
+      # that stops it coming back.
+      #
+      # -I skips binary files, -l lists names only, --cached reads the index
+      # rather than the worktree so a local core.autocrlf cannot mask it. The
+      # leading ! is what makes "found something" a failure.
+      - name: No CR in tracked text files
+        run: |
+          if git grep -Il --cached $'\r' -- '*.sh' '*.go' '*.md' '*.yml' '*.rb' Dockerfile; then
+            echo "::error::carriage returns found in tracked text files (see above)"
+            exit 1
+          fi
+          echo "no CR bytes in tracked text sources"
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint shell sources
+        run: |
+          shellcheck --version
+          # SC1090/SC1091: dynamic `. "$LS_LIB/x.sh"` sourcing is the module
+          #   loader and cannot be resolved statically.
+          # SC2034: lib/ files set variables consumed by other modules.
+          shellcheck -S warning -e SC1090,SC1091,SC2034 \
+            leetenum.sh lib/*.sh
+      - name: Lint POSIX installer
+        run: shellcheck -s sh -S warning install.sh
+
+      # Portability regressions that shellcheck does not flag, because each of
+      # these is valid shell that simply does not exist on macOS. Every one of
+      # them has a shim in lib/compat.sh, and the point of this step is that a
+      # later edit cannot quietly reintroduce the bare form: `timeout` in
+      # particular used to make all five bounded phases produce nothing at all
+      # on a Mac while reporting only that the tool had failed.
+      - name: No GNU-only utility reaches a call site
+        run: |
+          # Three things are blanked before the grep, and every one of them was a
+          # false positive first: the contents of double-quoted strings (the
+          # doctor row reads "shell watchdog (no timeout binary)"), full-line
+          # comments, and trailing comments (prose about the shims, e.g. "stays
+          # free of escape codes"). Blanking rather than deleting keeps the
+          # reported line numbers true.
+          #
+          # Only double-quoted strings are emptied. The bounded phases build their
+          # commands inside single-quoted ui_run_sh snippets, so those stay
+          # visible to the grep — which is the case that actually matters.
+          strip() {
+            sed -e 's/"[^"]*"/""/g' \
+                -e 's/^[[:space:]]*#.*$//' \
+                -e 's/[[:space:]]#[[:space:]].*$//' "$1"
+          }
+          pattern='(^|[;&|(][[:space:]]*|[[:space:]]|'"'"')(timeout|nproc|free|tac|sha256sum|md5sum|realpath|readlink -f|sed -i|xargs -r|find [^|]*-printf)[[:space:]]'
+          hits=0
+          for f in leetenum.sh lib/config.sh lib/deps.sh lib/pipeline.sh lib/ui.sh; do
+            # grep's status, not the pipeline's, decides whether this file matched.
+            out=$(strip "$f" | grep -nE "$pattern") || continue
+            printf '%s\n' "$out" | sed "s|^|${f}:|"
+            hits=1
+          done
+          if [ "$hits" -ne 0 ]; then
+            echo
+            echo "the above bypass lib/compat.sh; use the compat_* shim instead"
+            exit 1
+          fi
+          echo "clean: every call site goes through compat.sh"
+
+      - name: The two implementations ship one permutation wordlist
+        run: |
+          # Shipping two implementations at one version only means something if
+          # they produce the same artifacts, and the permutation seed list decides
+          # what phase 4 even looks for. The list is small enough to carry in the
+          # source — which is why it is duplicated, and why it can drift.
+          awk '/<<.PERMS.$/{f=1;next} /^PERMS$/{f=0} f' lib/pipeline.sh > /tmp/sh.perms
+          sed -n '/^var defaultPerms = \[\]byte(`/,/^`)$/p' internal/scan/wordlists.go \
+            | sed -e 's/^var defaultPerms = \[\]byte(`//' -e '/^`)$/d' > /tmp/go.perms
+
+          # Both extractions are pattern-based, so an empty result means the
+          # surrounding syntax moved, not that the lists agree. Without this a
+          # renamed heredoc delimiter would make the diff trivially pass.
+          for f in /tmp/sh.perms /tmp/go.perms; do
+            n=$(wc -l < "$f" | tr -d '[:space:]')
+            if [ "$n" -lt 100 ]; then
+              echo "extracted only ${n} words from ${f}; the extraction pattern is stale"
+              exit 1
+            fi
+          done
+
+          if ! diff -u /tmp/sh.perms /tmp/go.perms; then
+            echo
+            echo "lib/pipeline.sh and internal/scan/wordlists.go disagree;"
+            echo "update both or the shell and Go builds will enumerate differently"
+            exit 1
+          fi
+          dupes=$(sort /tmp/sh.perms | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "duplicate permutation words:"; printf '%s\n' "$dupes"; exit 1
+          fi
+          echo "identical: $(wc -l < /tmp/sh.perms | tr -d '[:space:]') words, no duplicates"
+
+  test:
+    name: tests (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,     name: "linux / bash 5",         shell: bash }
+          - { os: ubuntu-22.04,      name: "linux / older glibc",    shell: bash }
+          - { os: macos-14,          name: "macOS arm64 / bash 3.2", shell: bash }
+          # macos-13 was retired on 2025-12-04 and can no longer be scheduled, so
+          # this leg failed to start and took `test` — and with it `container` and
+          # `release`, which both need it — down with it. macos-15-intel is the
+          # supported x86_64 image and still ships /bin/bash 3.2 with a BSD
+          # userland, which is the whole point of the leg.
+          - { os: macos-15-intel,    name: "macOS x86_64 / bash 3.2", shell: bash }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the interpreter under test
+        run: |
+          /bin/bash --version | head -1
+          echo "uname: $(uname -srm)"
+          locale -a | head -5
+
+      # The point of the macOS jobs is /bin/bash 3.2 and the BSD userland, so
+      # they must not silently pick up Homebrew's bash or GNU coreutils.
+      - name: Confirm macOS is testing the system bash
+        if: runner.os == 'macOS'
+        run: |
+          major=$(/bin/bash -c 'printf %s "${BASH_VERSINFO[0]}"')
+          if [ "$major" != "3" ]; then
+            echo "expected /bin/bash 3.x, got ${major}"; exit 1
+          fi
+          if sort --version 2>/dev/null | grep -qi 'GNU coreutils'; then
+            echo "GNU sort is on PATH; the BSD code paths would not be tested"; exit 1
+          fi
+          echo "system bash 3.2 and BSD userland confirmed"
+
+      - name: Run the suite
+        run: /bin/bash tests/run.sh
+
+      - name: Run the suite under LC_ALL=C
+        run: LC_ALL=C /bin/bash tests/run.sh unit
+
+  installer:
+    name: installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install from a locally built tarball rather than from GitHub, so the test
+      # covers the installer itself and not the network. --no-tools keeps it to
+      # seconds; the toolchain is what `deps` covers.
+      - name: Install from a local snapshot
+        run: |
+          mkdir -p /tmp/pkg/LeetSec-Tools-ci
+          cp -R leetenum.sh lib tests install.sh README.md /tmp/pkg/LeetSec-Tools-ci/
+          tar -czf /tmp/leetenum.tar.gz -C /tmp/pkg LeetSec-Tools-ci
+          sh install.sh --tarball /tmp/leetenum.tar.gz \
+             --prefix "$HOME/ci-prefix" --bin "$HOME/ci-bin" --no-tools
+
+      - name: The installed entry point works through its symlink
+        run: |
+          "$HOME/ci-bin/leetenum" version
+          "$HOME/ci-bin/leetenum" --help >/dev/null
+          test -L "$HOME/ci-bin/leetenum"
+
+      - name: Re-running the installer upgrades in place
+        run: |
+          sh install.sh --tarball /tmp/leetenum.tar.gz \
+             --prefix "$HOME/ci-prefix" --bin "$HOME/ci-bin" --no-tools
+          "$HOME/ci-bin/leetenum" version
+
+      - name: Uninstall removes what it installed
+        run: |
+          sh "$HOME/ci-prefix/leetenum/install.sh" --uninstall \
+             --prefix "$HOME/ci-prefix" --bin "$HOME/ci-bin"
+          test ! -e "$HOME/ci-bin/leetenum"
+          test ! -d "$HOME/ci-prefix/leetenum"
+
+  # The Go orchestrator. It was written on a machine with no Go toolchain, so this
+  # job is the first place any of it is compiled — which is why it does rather more
+  # than run the unit tests.
+  go:
+    name: go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # The floor the code claims, not the newest release: building on the
+          # oldest supported toolchain is what keeps that claim honest.
+          go-version: "1.21"
+          # Nothing to cache. go.mod has no require block, so a warm module cache
+          # would only ever hold the standard library.
+          cache: false
+
+      - name: Report the toolchain
+        run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+
+      # gofmt disagreeing is a defect rather than a style opinion: every other Go
+      # tool assumes the canonical form, and a diff full of reformatting hides the
+      # change that actually mattered.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt clean:"; echo "$unformatted"; echo
+            gofmt -d .
+            exit 1
+          fi
+          echo "all files are gofmt clean"
+
+      # The empty dependency tree is a design commitment (the reasoning is at the
+      # top of go.mod). The way it gets broken is somebody importing a module and
+      # `go mod tidy` quietly adding it, so both halves are asserted here.
+      - name: The dependency tree is still empty
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod
+          if [ -e go.sum ]; then
+            echo "go.sum exists, so something outside the standard library got imported"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+
+      # -race because the recursive phase runs a worker pool and the console is
+      # written to from it; -count=1 because a cached PASS proves nothing about the
+      # commit that triggered this run.
+      - name: go test
+        run: go test -race -count=1 ./...
+
+      # Three things the unit tests cannot reach: that the binary links, that it
+      # reports the version it was built with, and that the flag surface behaves.
+      - name: The binary starts and its flags behave
+        run: |
+          go build -o /tmp/leetenum ./cmd/leetenum
+          /tmp/leetenum version
+          /tmp/leetenum --help | head -3
+          # A misspelled flag must be refused, not silently ignored. The shell
+          # parser fell through unknown options, so `--profle beast` ran the
+          # default profile and said nothing about it.
+          if /tmp/leetenum scan -d example.com --profle beast; then
+            echo "a misspelled flag was accepted"; exit 1
+          fi
+          if /tmp/leetenum scan -d example.com --profile nonsense; then
+            echo "an unknown profile was accepted"; exit 1
+          fi
+          if /tmp/leetenum scan -d example.com --only p42; then
+            echo "an unknown phase was accepted"; exit 1
+          fi
+          if /tmp/leetenum scan -d 'not a domain'; then
+            echo "an invalid target was accepted"; exit 1
+          fi
+          if /tmp/leetenum scan --profile lite; then
+            echo "a scan with no target was accepted"; exit 1
+          fi
+          echo "every bad invocation was rejected"
+      # Planning must not create or checkpoint a run. Resume behavior is covered
+      # by the offline tests in internal/scan using actual fixture executions.
+      - name: Dry run prints a complete plan without writing scan state
+        run: |
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+          /tmp/leetenum example.com --dry-run --offline --profile lite > plan.log
+          test ! -e recon_example.com
+          for id in 1 2 3 4 5 6 7 8 9; do
+            grep -Fq "[$id/9]" plan.log || { echo "no plan for phase $id"; exit 1; }
+          done
+          for tool in subfinder puredns httpx naabu katana nuclei gowitness; do
+            grep -q "$tool" plan.log || { echo "missing $tool command"; exit 1; }
+          done
+          if grep -q "$(printf '\033')" plan.log; then
+            echo "the plan contains ANSI escapes"; exit 1
+          fi
+          # An existing incomplete run must also remain untouched by planning.
+          mkdir -p recon_example.com/20000101_000000/.state
+          printf 'fixture checkpoint\n' > recon_example.com/20000101_000000/.state/p1.done
+          ln -s 20000101_000000 recon_example.com/latest
+          cp -R recon_example.com before
+          /tmp/leetenum example.com --dry-run --offline --only p1 > selected.log
+          grep -Fq '[1/9]' selected.log
+          if grep -Fq '[2/9]' selected.log; then
+            echo "--only p1 planned phase 2"; exit 1
+          fi
+          diff -r before recon_example.com
+
+  # The static binaries. This is the packaging path that makes "download one file
+  # and run it" true: no interpreter, no libc version to match, no dependency tree.
+  # Cross-compiling all four from one runner is possible only because CGO is off,
+  # which is itself only possible because nothing here links against C.
+  binaries:
+    name: binary (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    needs: [go]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: false
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          # On a tag the version is the tag. Off a tag it is a commit, marked
+          # 0.0.0 so nobody mistakes a CI artifact for a release.
+          case "$GITHUB_REF" in
+            refs/tags/v*) version="${GITHUB_REF_NAME#v}" ;;
+            *)            version="0.0.0-$(git rev-parse --short HEAD)" ;;
+          esac
+          name="leetenum_${version}_${GOOS}_${GOARCH}"
+          mkdir -p "dist/$name"
+          # -trimpath keeps the build machine's paths out of the binary: smaller,
+          # reproducible, and one less thing to leak in a client deliverable.
+          # -s -w drop the symbol table and DWARF, which is about a third of the
+          # size for something nobody debugs from a core dump.
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+             -o "dist/$name/leetenum" ./cmd/leetenum
+          cp README.md LICENSE "dist/$name/"
+          tar -czf "dist/${name}.tar.gz" -C dist "$name"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_ENV"
+          ls -l dist
+      # A cross-compiled binary that will not start is the failure this catches, and
+      # it is only checkable for the platform the runner is. The other three are
+      # macOS runner also compiles and exercises the source in the Go test job.
+      - name: The native build runs and is actually static
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          tar -xzf "dist/${name}.tar.gz" -C /tmp
+          "/tmp/${name}/leetenum" version
+          "/tmp/${name}/leetenum" --help > /dev/null
+          # The version has to come from the ldflags, not from the hardcoded
+          # default, or every bug report cites the wrong build.
+          if ! "/tmp/${name}/leetenum" version | grep -q "leetenum ${version} "; then
+            echo "the binary does not report the version it was built with:"
+            "/tmp/${name}/leetenum" version; exit 1
+          fi
+          file "/tmp/${name}/leetenum"
+          if ! file "/tmp/${name}/leetenum" | grep -Eq 'statically linked|static-pie'; then
+            echo "the binary is dynamically linked, so CGO leaked back in"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.name }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 14
+
+  container:
+    name: container image
+    runs-on: ubuntu-latest
+    needs: [lint, test, go]
+    permissions:
+      contents: read
+      packages: write   # used only by the push steps, which are tag-gated
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU is what makes the arm64 half of the manifest buildable on an amd64
+      # runner. It is slow — compiling the Go tools under emulation is minutes,
+      # not seconds — so the smoke test below builds natively and only the release
+      # push does both architectures.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Native single-arch build first: buildx cannot --load a multi-platform
+      # manifest, and an image that builds but does not run is not worth pushing.
+      - name: Build the runtime image for this runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: leetenum:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --network none proves the entry point does not quietly need the network to
+      # start up, which matters because `doctor` is the documented way to check an
+      # air-gapped host.
+      - name: The image runs unprivileged and offline
+        run: |
+          docker run --rm --network none leetenum:ci version
+          docker run --rm --network none leetenum:ci --help >/dev/null
+          uid=$(docker run --rm --network none --entrypoint id leetenum:ci -u)
+          if [ "$uid" != "1000" ]; then
+            echo "image runs as uid ${uid}, expected 1000"; exit 1
+          fi
+          # doctor exits non-zero when a required tool is missing. Everything the
+          # pipeline needs is baked into this image, so it must exit 0 here — that
+          # is the check that the builder stage actually produced every pinned tool
+          # plus massdns.
+          docker run --rm --network none --entrypoint bash leetenum:ci -c '
+            . /opt/leetenum/lib/deps.sh
+            for entry in "${DEPS_GO_TOOLS[@]}"; do
+              name=${entry%%|*}
+              command -v "$name" || exit 1
+            done
+            command -v massdns
+          '
+          docker run --rm --network none leetenum:ci doctor
+
+      # The whole point of the non-root user: a bind-mounted results directory
+      # must not come back owned by root.
+      - name: Results in a bind mount belong to the invoking user
+        run: |
+          mkdir -p /tmp/work
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+                 -v /tmp/work:/work --entrypoint sh leetenum:ci \
+                 -c 'printf ok > /work/probe'
+          test -O /tmp/work/probe
+
+      - name: Log in to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Two published variants. `:slim` is the runtime target and the one to pin in
+      # someone else's CI; `:latest` is the full target, because a first-time user
+      # who runs the default tag and gets no screenshots reads that as a bug.
+      - name: Push :slim for linux/amd64 + linux/arm64
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/theleetsec/leetenum:slim
+            ghcr.io/theleetsec/leetenum:${{ github.ref_name }}-slim
+          cache-from: type=gha
+
+      - name: Push :latest for linux/amd64 + linux/arm64
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: full
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/theleetsec/leetenum:latest
+            ghcr.io/theleetsec/leetenum:${{ github.ref_name }}
+          cache-from: type=gha
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    needs: [lint, test, go, binaries, installer]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write   # creates the release and uploads the formula
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag that disagrees with the version in the source means `leetenum version`
+      # lies about which release is installed, and every bug report after it cites
+      # the wrong number. Both entry points are checked: the shell one reads its
+      # constant at runtime, and the Go one is only overridden by the release build,
+      # so its hardcoded default is what a `go install` from source would report.
+      - name: Tag and source versions agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          src=$(sed -n 's/^LEETENUM_VERSION="\([^"]*\)".*/\1/p' leetenum.sh | head -1)
+          if [ "$tag" != "$src" ]; then
+            echo "tag v${tag} but leetenum.sh reports ${src:-nothing}"; exit 1
+          fi
+          gos=$(sed -n 's/^var version = "\([^"]*\)".*/\1/p' cmd/leetenum/main.go | head -1)
+          if [ "$tag" != "$gos" ]; then
+            echo "tag v${tag} but cmd/leetenum/main.go reports ${gos:-nothing}"; exit 1
+          fi
+          echo "version ${src}"
+
+      # The binaries were built and checked by the `binaries` job; this only
+      # collects them. Rebuilding here would publish artifacts nothing tested.
+      - name: Collect the built binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: leetenum_*
+          path: /tmp/bin
+          merge-multiple: true
+
+      - name: Combine the checksums
+        run: |
+          cd /tmp/bin
+          cat ./*.tar.gz.sha256 > SHA256SUMS
+          rm -f ./*.tar.gz.sha256
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
+      # Homebrew installs from the tarball GitHub generates for the tag, so the
+      # sha256 has to be taken from that exact artifact rather than from a locally
+      # built one — `git archive` output is not byte-identical to it.
+      - name: Checksum the release tarball
+        run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          curl -fsSL --retry 3 -o /tmp/src.tar.gz "$url"
+          sum=$(sha256sum /tmp/src.tar.gz | cut -d' ' -f1)
+          echo "url=$url"  >> "$GITHUB_ENV"
+          echo "sha=$sum"  >> "$GITHUB_ENV"
+          # A tarball that does not contain a working program is worse than no
+          # release at all.
+          tar -tzf /tmp/src.tar.gz >/dev/null
+          echo "$sum"
+
+      # The formula in this repo is the source of truth for its contents; the tap
+      # copy is generated from it. Only the url and sha256 lines change, plus the
+      # marked block that must not ship — see the markers in the formula for why.
+      - name: Render the tap formula
+        run: |
+          mkdir -p /tmp/tap
+          awk -v url="$url" -v sha="$sha" '
+              /^  # tap-strip:begin/ { skip = 1; seen = 1; next }
+              /^  # tap-strip:end/   { skip = 0; next }
+              skip                   { next }
+              /Replaced by CI on release/ { next }
+              /^  url /              { $0 = "  url \"" url "\"" }
+              /^  sha256 /           { $0 = "  sha256 \"" sha "\"" }
+              $0 == "" && prev == "" { next }
+              { print; prev = $0 }
+              END { if (!seen) { print "no tap-strip markers found" > "/dev/stderr"; exit 3 } }
+          ' packaging/homebrew/leetenum.rb > /tmp/tap/leetenum.rb
+          grep -q "$sha" /tmp/tap/leetenum.rb
+          if grep -q '0000000000000000' /tmp/tap/leetenum.rb; then
+            echo "a placeholder checksum survived rendering"; exit 1
+          fi
+          ruby -c /tmp/tap/leetenum.rb
+
+      # Pushing to another repository needs a token this one's GITHUB_TOKEN cannot
+      # provide. When the secret is absent the release still succeeds and the
+      # rendered formula is attached to it, so the tap can be updated by hand
+      # instead of the release failing outright.
+      - name: Sync the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set; skipping the tap push."
+            echo "Copy the formula from this release into theleetsec/homebrew-tap."
+            exit 0
+          fi
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/theleetsec/homebrew-tap.git" \
+            /tmp/tap-repo
+          mkdir -p /tmp/tap-repo/Formula
+          cp /tmp/tap/leetenum.rb /tmp/tap-repo/Formula/leetenum.rb
+          cd /tmp/tap-repo
+          git config user.name  "leetsec-ci"
+          git config user.email "ci@leetsecurity.invalid"
+          git add Formula/leetenum.rb
+          # Written as an if, not `git diff --quiet && exit`: every run: block here
+          # is a `bash -e` script, so a pending change would make the && form the
+          # last command with a non-zero status and fail the step on the path where
+          # there is work to do.
+          if git diff --quiet --cached; then
+            echo "tap already current"; exit 0
+          fi
+          git commit -m "leetenum ${GITHUB_REF_NAME#v}"
+          git push
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v="${GITHUB_REF_NAME}"
+          cat > /tmp/notes.md <<NOTES
+          ## Standalone binary
+
+          The orchestrator runs as one static file. Scans also need the external
+          recon tools shown by \`leetenum doctor\`. Pick the binary for your machine from the assets below — \`darwin_arm64\` is Apple Silicon,
+          \`darwin_amd64\` is Intel — then:
+
+          \`\`\`sh
+          tar -xzf leetenum_${v#v}_\$(uname -s | tr A-Z a-z)_*.tar.gz
+          sudo install -m 755 leetenum_*/leetenum /usr/local/bin/leetenum
+          leetenum doctor
+          \`\`\`
+
+          Checksums for the binary archives are in \`SHA256SUMS\`.
+
+          ## Install from source
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${v}/install.sh | sh -s -- --ref ${v}
+          \`\`\`
+
+          The checksummed Homebrew formula is attached as \`leetenum.rb\`.
+          It can be copied into a Homebrew tap's \`Formula/\` directory.
+
+          Container images are built and published by the separate container job.
+          Check that job's status before using \`ghcr.io/theleetsec/leetenum:${v}\`.
+
+          Windows: install under WSL2.
+
+          ## Verify
+
+          \`\`\`
+          source tarball  ${sha}
+          \`\`\`
+
+          Every binary asset is listed in \`SHA256SUMS\`; check one with
+          \`sha256sum -c SHA256SUMS --ignore-missing\`.
+
+          Run \`leetenum doctor\` after installing; it reports every tool the
+          pipeline looks for and exits non-zero if a required one is missing.
+          NOTES
+          # Re-running a failed release job must not be blocked by the release the
+          # first attempt already created, so create-or-update rather than create.
+          if gh release view "$v" >/dev/null 2>&1; then
+            gh release edit "$v" --notes-file /tmp/notes.md
+          else
+            gh release create "$v" --title "LeetEnum $v" --notes-file /tmp/notes.md
+          fi
+          gh release upload "$v" \
+             "/tmp/tap/leetenum.rb#Homebrew formula for this release" --clobber
+          # --clobber on the binaries too, so re-running a failed release replaces
+          # the assets the first attempt uploaded instead of erroring on each one.
+          gh release upload "$v" /tmp/bin/*.tar.gz /tmp/bin/SHA256SUMS --clobber
