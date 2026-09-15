@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Install the required DNS recovery tool and Go compiler through the Homebrew formula, so its documented dependency setup is available on a fresh machine.
+
 ## [1.1.1] - 2026-09-15
 
 - Report success against the requested phases while preserving selected runs for later continuation. Keep failed or budget-truncated requested phases pending in both implementations.

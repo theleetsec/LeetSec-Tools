@@ -46,6 +46,7 @@ class Leetenum < Formula
   depends_on "bash"
   depends_on "coreutils"
   depends_on "jq"
+  depends_on "dnsx"
 
   depends_on "httpx"
   depends_on "katana"
@@ -56,7 +57,7 @@ class Leetenum < Formula
   # amass, assetfinder, gotator, gowitness, puredns and waybackurls have no
   # formulae. `leetenum install` fetches them with pinned versions, and every
   # phase that needs one degrades with a warning instead of failing the run.
-  depends_on "go" => :recommended
+  depends_on "go"
 
   def install
     libexec.install "leetenum.sh", "lib"
