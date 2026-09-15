@@ -96,6 +96,9 @@ brew tap theleetsec/tap
 brew install leetenum
 ```
 
+
+Newer Homebrew versions may require explicit formula trust before tapping. After reviewing the formula, run `brew trust --formula theleetsec/tap/leetenum`, then retry `brew tap theleetsec/tap`. Older versions without `brew trust` can omit this step.
+
 **Container**, which is also the supported way to run on Windows:
 
 ```sh
