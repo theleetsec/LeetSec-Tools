@@ -152,7 +152,7 @@ func (p *Pipeline) writeManifest(c counts) error {
 		Platform string         `json:"platform"`
 		Phases   []string       `json:"phases"`
 		Counts   map[string]int `json:"counts"`
-	}{"1.0.0", p.opt.Target, p.prof.Name, p.h.String(), PhaseIDs(), map[string]int{
+	}{"1.1.1", p.opt.Target, p.prof.Name, p.h.String(), PhaseIDs(), map[string]int{
 		"resolved_hostnames": c.dns, "live_http_services": c.live, "open_ports": c.ports,
 		"crawled_urls": c.urls, "vulnerability_findings": c.findings, "new_since_previous": c.appeared,
 		"passive_candidates":            CountLines(p.L.Path("01_candidates.txt")),
@@ -239,7 +239,11 @@ const maxInlineFindings = 25
 // a scan that resolved nothing is a configuration problem, not a clean result — and
 // findings are flagged when there are any.
 func (p *Pipeline) reportTerminal(c counts) {
-	p.con.SummaryOpen("Scan complete: " + p.opt.Target)
+	status := "complete"
+	if !p.requestedSatisfied() {
+		status = "incomplete"
+	}
+	p.con.SummaryOpen("Scan " + status + ": " + p.opt.Target)
 	p.con.SummaryRow("Duration", p.con.Elapsed().String(), ui.LevelNone)
 	p.con.SummaryRow("Profile", p.prof.Name, ui.LevelNone)
 	p.con.SummaryRow("Resolved hostnames", itoa(c.dns), level(c.dns > 0, ui.LevelOK, ui.LevelWarn))

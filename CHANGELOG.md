@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.1] - 2026-09-15
+
+- Report success against the requested phases while preserving selected runs for later continuation. Keep failed or budget-truncated requested phases pending in both implementations.
+- Persist optional HTTP-source errors, missing discovery-tool warnings and Amass budget exhaustion. Download archive index responses before parsing so curl failures cannot be hidden by a successful downstream pipeline; retry transport failures within the existing budgets.
+- Build release binaries with the current Go compiler to avoid older macOS linker incompatibilities, and keep the manifest version aligned with the release.
+
 ## [1.1.0] - 2026-09-15
 
 - Use Amass database export (`enum` followed by `subs -names`) with the configured default engine/database instead of the removed `enum -o` flag. Preserve enumeration output and export diagnostics; engine or export failures produce explicit optional-source warnings.

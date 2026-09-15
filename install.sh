@@ -15,7 +15,7 @@
 # Options (also settable as environment variables):
 #   --prefix DIR     install root                 (LEETENUM_PREFIX)
 #   --bin DIR        directory for the symlink    (LEETENUM_BIN)
-#   --ref REF        branch, tag or commit        (LEETENUM_REF, default v1.1.0)
+#   --ref REF        branch, tag or commit        (LEETENUM_REF, default v1.1.1)
 #   --tarball FILE   install from a local .tar.gz instead of downloading,
 #                    for air-gapped hosts        (LEETENUM_TARBALL)
 #   --no-tools       skip the recon toolchain
@@ -25,7 +25,7 @@ set -eu
 REPO="theleetsec/LeetSec-Tools"
 # ghcr rejects uppercase in image paths, so this cannot be derived from $REPO.
 IMAGE="ghcr.io/theleetsec/leetenum"
-REF="${LEETENUM_REF:-v1.1.0}"
+REF="${LEETENUM_REF:-v1.1.1}"
 PREFIX="${LEETENUM_PREFIX:-}"
 BINDIR="${LEETENUM_BIN:-}"
 LOCAL_TARBALL="${LEETENUM_TARBALL:-}"

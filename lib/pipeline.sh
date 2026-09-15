@@ -227,6 +227,19 @@ pipe_all_done() {
     [ "${PIPE_RUN_FAILED:-false}" != "true" ]
 }
 
+# A selected run can succeed without becoming a full differential baseline.
+pipe_requested_done() {
+    local id
+    for id in p1 p2 p3 p4 p5 p6 p7 p8 p9; do
+        if [ -n "${PIPE_ARG_ONLY:-}" ]; then
+            case ",${PIPE_ARG_ONLY}," in *",${id},"*) ;; *) continue ;; esac
+        fi
+        case ",${PIPE_ARG_SKIP:-}," in *",${id},"*) continue ;; esac
+        pipe_done "$id" || return 1
+    done
+    [ "${PIPE_RUN_FAILED:-false}" != "true" ]
+}
+
 # ---------------------------------------------------------------------------
 # In-scope filtering
 #
@@ -630,6 +643,7 @@ pipe_phase_passive() {
             cp "${OUT_DIR}/amass-names.txt" "${WORK_DIR}/amass.txt" || return 1
         else pipe_optional_warning "amass enumeration failed; see logs/amass.log"
         fi
+        [ "$amass_rc" -ne 124 ] || pipe_optional_warning "amass enumeration reached its budget; exported partial discoveries"
     else pipe_optional_warning "amass not installed; continuing other passive sources"
     fi
 
@@ -637,6 +651,7 @@ pipe_phase_passive() {
         ui_step_cfg "${LOG_DIR}/findomain.log" "${WORK_DIR}/findomain.txt" "" true
         ui_run_sh "findomain" 'findomain -t "$PIPE_TARGET" -q > "$PIPE_WORK/findomain.txt"' \
             || pipe_optional_warning "findomain failed; continuing other passive sources"
+    else pipe_optional_warning "findomain not installed; continuing other passive sources"
     fi
 
     if command -v jq >/dev/null 2>&1; then
@@ -656,23 +671,24 @@ pipe_phase_passive() {
         # 6 minute one. No further attempt starts after 150s.
         ui_step_cfg "${LOG_DIR}/crtsh.log" "${WORK_DIR}/crtsh.txt"
         ui_run_sh "crt.sh certificate transparency" '
-            curl -fsS --retry 2 --retry-delay 3 --retry-max-time 150 --max-time 120 \
+            curl -fsS --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 150 --max-time 120 \
                  -A "LeetEnum" -o "$PIPE_WORK/crtsh.json" \
                  "https://crt.sh/?q=%25.${PIPE_TARGET}&output=json" || exit $?
             jq -r ".[].name_value" < "$PIPE_WORK/crtsh.json" \
               | compat_bytes tr "[:upper:]" "[:lower:]" \
               | compat_bytes sed "s/^\*\.//" \
               | compat_bytes sort -u \
-              > "$PIPE_WORK/crtsh.txt"'
+            > "$PIPE_WORK/crtsh.txt"' || pipe_optional_warning "crt.sh failed; see logs/crtsh.log"
     fi
 
     ui_step_cfg "${LOG_DIR}/wayback.log" "${WORK_DIR}/wayback.txt"
     ui_run_sh "Wayback Machine index" '
-        curl -fsS --max-time 180 "https://web.archive.org/cdx/search/cdx?url=*.${PIPE_TARGET}/*&output=text&fl=original&collapse=urlkey" \
-          | compat_bytes awk -F/ "{print \$3}" \
+        curl -fsS --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 180 --max-time 120 \
+          -o "$PIPE_WORK/wayback-response.txt" "https://web.archive.org/cdx/search/cdx?url=*.${PIPE_TARGET}/*&output=text&fl=original&collapse=urlkey" || exit $?
+        compat_bytes awk -F/ "{print \$3}" "$PIPE_WORK/wayback-response.txt" \
           | compat_bytes awk -F: "{print \$1}" \
           | compat_bytes sort -u \
-          > "$PIPE_WORK/wayback.txt"'
+          > "$PIPE_WORK/wayback.txt"' || pipe_optional_warning "Wayback index failed; see logs/wayback.log"
 
     _pipe_finish_passive "$target" "$raw" "$art"
 }
@@ -1262,7 +1278,7 @@ _pipe_report_terminal() {
     local n_vulns="$7" n_new="$8"
 
     local status="complete"
-    pipe_all_done || status="incomplete"
+    pipe_requested_done || status="incomplete"
     ui_summary_open "Scan ${status}: ${target}"
     ui_summary_row "Duration" "$(ui_elapsed)"
     ui_summary_row "Profile" "$profile"
@@ -1286,11 +1302,15 @@ _pipe_report_terminal() {
 # network mounts).
 # ---------------------------------------------------------------------------
 pipe_finalise() {
-    if pipe_all_done; then
+    if [ -z "${PIPE_ARG_ONLY:-}" ] && pipe_requested_done; then
         date +%s > "${STATE_DIR}/complete" || return 1
     else
         rm -f "${STATE_DIR}/complete"
-        ui_info "Run remains incomplete; repeat the command to retry pending phases."
+        if pipe_requested_done; then
+            ui_info "Selected phases completed; saved run remains available for additional phases."
+        else
+            ui_info "Run remains incomplete; repeat the command to retry pending phases."
+        fi
     fi
     local link="${BASE_DIR}/latest"
     rm -rf "$link" 2>/dev/null || true

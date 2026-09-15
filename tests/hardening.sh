@@ -32,6 +32,16 @@ test_hardening_e2e() {
     printf '\n== Hardening regressions\n'
     local out="${TMP}/hardening-e2e" run trace="${TMP}/hardening.trace" exclusions="${TMP}/hardening-exclusions.txt"
     printf '*.mx.saas.example.com\n' > "$exclusions"
+    local status_out="${TMP}/selected-status" status_run
+    if FAKE_CURL_FAIL=1 run_scan "$status_out" --only p1,p5,p7; then
+        ok "selected phases succeed despite HTTP source failures"
+    else bad "selected phases succeed despite HTTP source failures" "scan failed"; fi
+    status_run=$(find "$status_out/recon_example.com" -maxdepth 1 -mindepth 1 -type d -name '20*' | sort -r | head -n 1)
+    yes_ "selected run reports completion" "$(grep -q 'Scan complete: example.com' "$status_run/logs/leetenum.log"; echo $?)"
+    yes_ "selected run remains resumable without baseline marker" "$([ ! -f "$status_run/.state/complete" ]; echo $?)"
+    yes_ "crt.sh failure recorded durably" "$(grep -q 'crt.sh failed' "$status_run/optional-warnings.log"; echo $?)"
+    yes_ "Wayback failure is not swallowed by pipeline" "$(grep -q 'Wayback index failed' "$status_run/optional-warnings.log"; echo $?)"
+    yes_ "report warning count reflects failures" "$(grep -q 'Optional source warnings | 2 ' "$status_run/reports/summary.md"; echo $?)"
     if FAKE_TOOL_TRACE="$trace" FAKE_EXTRA_NAMES=1 FAKE_DNS_DROP=1 FAKE_AMASS_FAIL=1 FAKE_SUBFINDER_FAIL=1 \
         run_scan "$out" --only p1 --exclude-file "$exclusions"; then ok "optional source failures do not fail passive phase"
     else bad "optional source failures do not fail passive phase" "scan failed"; fi

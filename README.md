@@ -1,4 +1,4 @@
-# LeetEnum v1.1.0
+# LeetEnum v1.1.1
 
 [![CI](https://github.com/theleetsec/LeetSec-Tools/actions/workflows/ci.yml/badge.svg)](https://github.com/theleetsec/LeetSec-Tools/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/theleetsec/LeetSec-Tools?sort=semver)](https://github.com/theleetsec/LeetSec-Tools/releases)
@@ -42,7 +42,7 @@ after `internal.staging.example.com` is known.
 The live line while it works:
 
 ```
-  leetenum  1.1.0   reconnaissance pipeline
+  leetenum  1.1.1   reconnaissance pipeline
   ·•◦•·•◦•·•◦•·•◦•
   ⠋ passive APIs (crt.sh, wayback, otx, …)  12s   names 1402  resolved 0  live 0
 ```
@@ -69,7 +69,7 @@ Four paths. Pick one; they all end up with `leetenum` on your `PATH`.
 suffix with `linux_arm64`, `darwin_amd64` or `darwin_arm64` as needed.
 
 ```sh
-v=1.1.0
+v=1.1.1
 curl -fsSLO "https://github.com/theleetsec/LeetSec-Tools/releases/download/v${v}/leetenum_${v}_linux_amd64.tar.gz"
 curl -fsSLO "https://github.com/theleetsec/LeetSec-Tools/releases/download/v${v}/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS

@@ -375,6 +375,10 @@ func (p *Pipeline) allSatisfied() bool {
 	if len(p.only) > 0 {
 		return false
 	}
+	return p.requestedSatisfied()
+}
+
+func (p *Pipeline) requestedSatisfied() bool {
 	for _, ph := range phases() {
 		if !p.wanted(ph.id) {
 			continue

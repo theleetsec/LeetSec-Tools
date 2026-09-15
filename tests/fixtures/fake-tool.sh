@@ -78,6 +78,7 @@ case "$name" in
         printf 'api.%s\n' "$d"
         ;;
     curl)
+        [ "${FAKE_CURL_FAIL:-0}" = 1 ] && { printf 'synthetic upstream failure\n' >&2; exit 56; }
         out=$(flagval -o "$@") || out=/dev/stdout
         case "${!#}" in
             *crt.sh*) printf '[{"name_value":"api.example.com"}]\n' > "$out" ;;

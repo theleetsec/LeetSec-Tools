@@ -55,6 +55,8 @@ func (p *Pipeline) phasePassive(ctx context.Context) error {
 		p.execOptional(ctx, "findomain", "findomain", out,
 			"findomain", "-t", p.opt.Target, "-q")
 		p.absorb(candidates, out)
+	} else {
+		p.optionalWarning("findomain: not installed; other passive sources remain enabled")
 	}
 
 	p.pullAPIs(ctx, candidates)

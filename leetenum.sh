@@ -16,7 +16,7 @@
 # `set -u` still catches genuine typos.
 set -uo pipefail
 
-LEETENUM_VERSION="1.1.0"
+LEETENUM_VERSION="1.1.1"
 
 # ---------------------------------------------------------------------------
 # Self-location.

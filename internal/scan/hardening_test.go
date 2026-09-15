@@ -379,3 +379,41 @@ pipe_crawl_urls "$3"
 		}
 	}
 }
+
+func TestRequestedCompletionKeepsSelectedRunResumable(t *testing.T) {
+	p := hardeningPipeline(t)
+	p.only = idSet([]string{"p1", "p5", "p7"})
+	for _, id := range []string{"p1", "p5", "p7"} {
+		if err := p.st.MarkDone(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !p.requestedSatisfied() {
+		t.Fatal("finished selection appears incomplete")
+	}
+	if p.allSatisfied() {
+		t.Fatal("selected run became a full baseline")
+	}
+	var output bytes.Buffer
+	con, err := ui.New(&output, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer con.Close()
+	p.con = con
+	p.reportTerminal(counts{})
+	if !strings.Contains(output.String(), "Scan complete: example.com") {
+		t.Fatal(output.String())
+	}
+	if err := p.st.Clear("p7"); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	p.reportTerminal(counts{})
+	if !strings.Contains(output.String(), "Scan incomplete: example.com") {
+		t.Fatal(output.String())
+	}
+	if p.requestedSatisfied() {
+		t.Fatal("unfinished selection appears complete")
+	}
+}
