@@ -36,7 +36,7 @@ setup_fakes() {
     mkdir -p "$FAKE_BIN"
     local t
     for t in subfinder assetfinder amass puredns gotator httpx naabu \
-             katana nuclei gowitness waybackurls massdns; do
+             katana nuclei gowitness waybackurls massdns dnsx findomain curl gau tlsx dig; do
         ln -sf "${TESTS_DIR}/fixtures/fake-tool.sh" "${FAKE_BIN}/${t}"
     done
     chmod +x "${TESTS_DIR}/fixtures/fake-tool.sh"
@@ -152,6 +152,8 @@ load_libs() {
     . "${ROOT}/lib/deps.sh"
     # shellcheck source=/dev/null
     . "${ROOT}/lib/pipeline.sh"
+    # shellcheck source=/dev/null
+    . "${ROOT}/lib/hardening.sh"
     compat_init
     ui_init
 }
@@ -745,9 +747,11 @@ test_wordlists() {
 # first full run, and --only truncates that log, so phase selection is checked
 # after it.
 # ---------------------------------------------------------------------------
+# shellcheck source=/dev/null
+. "${TESTS_DIR}/hardening.sh"
 UNITS="test_compat test_target_validation test_scope_filter test_profiles \
-       test_ui test_config test_wordlists"
-E2E="test_e2e test_non_tty test_resume test_only_skip test_differential"
+       test_ui test_config test_wordlists test_hardening_units"
+E2E="test_e2e test_non_tty test_resume test_only_skip test_differential test_hardening_e2e"
 
 main() {
     local mode="${1:-all}" suite t

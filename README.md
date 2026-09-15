@@ -1,4 +1,4 @@
-# LeetEnum v1.0.0
+# LeetEnum v1.1.0
 
 [![CI](https://github.com/theleetsec/LeetSec-Tools/actions/workflows/ci.yml/badge.svg)](https://github.com/theleetsec/LeetSec-Tools/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/theleetsec/LeetSec-Tools?sort=semver)](https://github.com/theleetsec/LeetSec-Tools/releases)
@@ -42,7 +42,7 @@ after `internal.staging.example.com` is known.
 The live line while it works:
 
 ```
-  leetenum  1.0.0   reconnaissance pipeline
+  leetenum  1.1.0   reconnaissance pipeline
   ·•◦•·•◦•·•◦•·•◦•
   ⠋ passive APIs (crt.sh, wayback, otx, …)  12s   names 1402  resolved 0  live 0
 ```
@@ -69,7 +69,7 @@ Four paths. Pick one; they all end up with `leetenum` on your `PATH`.
 suffix with `linux_arm64`, `darwin_amd64` or `darwin_arm64` as needed.
 
 ```sh
-v=1.0.0
+v=1.1.0
 curl -fsSLO "https://github.com/theleetsec/LeetSec-Tools/releases/download/v${v}/leetenum_${v}_linux_amd64.tar.gz"
 curl -fsSLO "https://github.com/theleetsec/LeetSec-Tools/releases/download/v${v}/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS
@@ -139,13 +139,13 @@ phase it stopped in. `--fresh` starts over instead.
 
 | id | phase | tools | bounded at |
 |----|-------|-------|-----------|
-| p1 | Passive intel | subfinder, assetfinder, amass, crt.sh | amass 10m |
+| p1 | Passive intel | subfinder, assetfinder, amass, crt.sh; dnsx recovery | amass 10m + export 2m |
 | p2 | Brute force | puredns + massdns | — |
 | p3 | Recursive brute force | puredns, per-parent worker pool | — |
 | p4 | Permutations | gotator + puredns | gotator 30m |
 | p5 | HTTP probing | httpx | — |
 | p6 | Port scanning | naabu, then httpx on what it finds | — |
-| p7 | Crawling | katana, waybackurls | katana 45m, wayback 10m |
+| p7 | Crawling | katana, waybackurls, gau; dnsx recovery | katana 45m–6h, archives 10m each |
 | p8 | Vulnerability scan | nuclei | — |
 | p9 | Screenshots | gowitness + Chromium | 30m |
 
@@ -156,7 +156,69 @@ redirect chain are never seen by DNS enumeration.
 
 The bounded phases exist because recon tools have no natural end. amass on a large
 target and katana on a single-page app will both run until something stops them, and
-hitting a budget is treated as success with partial output, not as a failure.
+hitting a budget retains partial output. Crawl budget exhaustion leaves phase 7
+pending so saved work can be continued; optional source failures are recorded as
+warnings and do not invalidate successful results from other sources.
+
+### Collection reliability and exclusions
+
+Amass v4/v5 discovery uses `amass enum -passive -d <domain> -nocolor`, followed by
+`amass subs -names -d <domain> -nocolor`. Both use Amass's configured default
+database. Amass v5 requires its separately configured collection engine and asset
+database; leetenum does not start an engine or replace its configuration. The
+enumeration transcript, exported names and per-command diagnostics are retained.
+An unavailable engine, unsupported version or failed export produces an explicit
+warning while the other sources continue.
+
+Collected candidates are kept in `01_candidates.txt` and `07_candidates.txt`.
+Bulk DNS resolution does not suppress wildcards or sanitize already validated
+collected names. Misses receive an independent dnsx A/AAAA pass with 100 workers,
+three retries and a rate capped at 500 queries/second. dnsx is a required dependency
+for this recovery path. Remaining names are retained separately in
+`01_unresolved.txt` and `07_unresolved.txt`; resolver failure keeps the phase pending
+and preserves partial verified output. DNS availability can change, and shared
+edge/wildcard answers do not establish distinct applications or ownership.
+
+Use `--exclude-file exclusions.txt` in either implementation to omit collection
+names before resolution and downstream use. The file accepts exact hostnames or
+`*.suffix` patterns, one per line, with blank lines and `#` comments:
+
+```text
+# Illustrative customer namespace, not a built-in target policy
+*.mx.saas.example.com
+unwanted.example.com
+```
+
+The wildcard excludes descendants such as `customer.mx.saas.example.com` while
+preserving `mx.saas.example.com`. Exact patterns exclude only that name. Matching
+is case-insensitive and respects label boundaries. These are opt-in collection
+filters; ownership verification and program scope decisions remain separate.
+The filters also apply to names reintroduced by TLS, archives, crawling and master
+rebuilding. Normalized patterns are saved in `collection-exclusions.txt`; resume
+requires the same patterns, or `--fresh` for a new run. Raw tool diagnostics may
+contain excluded input as provenance and are not collection master lists.
+
+### Continuing a truncated crawl
+
+Katana's default wall-clock budget is 45 minutes per started block of 1,000 live
+seed URLs, capped at six hours. `--crawl-budget 2h` overrides the Katana budget and
+each archive source's default 10-minute budget. Both implementations
+accept positive whole seconds, minutes or hours (e.g. `2700`, `45m`, `2h`), up to
+168 hours. Existing crawl depth, concurrency and request-rate limits are unchanged.
+
+```sh
+leetenum example.com --resume-crawl --crawl-budget 2h --exclude-file exclusions.txt
+bash leetenum.sh example.com --resume-crawl --crawl-budget 2h --exclude-file exclusions.txt
+```
+
+`--resume-crawl` selects only phase 7. Completed batches of at most 100 seeds and
+completed archive sources are skipped. Partial URLs are merged with prior output;
+the unfinished batch is retried. It is continuation at the seed-batch level, not a
+checkpoint of every crawler request. An unfinished archive query is replayed and
+deduplicated because its external CLI has no portable cursor. Pending sources are
+listed in `07_crawl_pending.txt`. A regular interrupted run also uses saved progress;
+explicit `--only p7` without `--resume-crawl` restarts the crawl work. `--fresh` starts
+a new run and cannot be combined with `--resume-crawl`.
 
 ## Profiles
 
@@ -322,11 +384,25 @@ because a dynamically linked artifact would silently break the one-file install 
 
 Worth knowing before you trust a green build.
 
-The recon tools are never actually executed by the suite. Every pipeline test uses a
+The default suite uses stand-in recon tools. Every pipeline test uses a
 stand-in toolchain or `--dry-run`, so what is verified is the orchestration — sequencing,
 scope filtering, artifact handling, resume, budgets — and not the parsing of any real
 tool's real output. A tool changing its output format is a class of breakage these
-tests will not catch.
+tests may not catch.
+
+An optional installed-tool compatibility check uses a synthetic DNS server bound
+only to loopback:
+
+```sh
+python3 tests/local-dns-check.py
+```
+
+It requires installed puredns, massdns and dnsx. It checks underscore-label
+sanitization, AAAA-only records, and recovery of a simulated first-pass omission
+using the real tool output formats. Logs are saved in a fresh temporary directory;
+set `LEETENUM_TEST_OUTPUT_DIR` to choose a diagnostic directory. The default CI
+suite remains offline and also compares Bash and Go recovery and crawl checkpoint
+artifacts directly.
 
 The container image and the Homebrew formula are built and installed only by CI on
 release; neither has a test that runs on every commit. The installer's download path is

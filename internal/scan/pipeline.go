@@ -21,17 +21,20 @@ import (
 // nine positional parameters through three layers and produced two argument-order
 // bugs doing it.
 type Options struct {
-	Target   string
-	OutRoot  string
-	Profile  string   // "" to size from the machine, or lite/balanced/beast
-	Wordlist string   // overrides the cached brute-force list
-	Deep     bool     // include low and info severity findings
-	Fresh    bool     // ignore any resumable run and start from phase one
-	Offline  bool     // never fetch wordlists; use whatever is cached
-	Only     []string // phase ids to run, to the exclusion of the rest
-	Skip     []string // phase ids to skip
-	DryRun   bool     // print the commands, execute nothing
-	SubsOnly bool     // subdomain hunt only: skip ports, nuclei, screenshots
+	Target      string
+	OutRoot     string
+	Profile     string        // "" to size from the machine, or lite/balanced/beast
+	Wordlist    string        // overrides the cached brute-force list
+	Deep        bool          // include low and info severity findings
+	Fresh       bool          // ignore any resumable run and start from phase one
+	Offline     bool          // never fetch wordlists; use whatever is cached
+	Only        []string      // phase ids to run, to the exclusion of the rest
+	Skip        []string      // phase ids to skip
+	DryRun      bool          // print the commands, execute nothing
+	SubsOnly    bool          // subdomain hunt only: skip ports, nuclei, screenshots
+	ExcludeFile string        // exact names or *.suffix patterns, one per line
+	CrawlBudget time.Duration // zero selects a size-dependent Katana budget and 10m per archive
+	ResumeCrawl bool          // continue only p7 from durable crawl progress
 }
 
 // Pipeline owns one run: where it writes, what it may spend, and how far it got.
@@ -48,8 +51,10 @@ type Pipeline struct {
 	only map[string]bool
 	skip map[string]bool
 
-	phaseMu  sync.Mutex
-	phaseErr error
+	phaseMu    sync.Mutex
+	phaseErr   error
+	exclusions []string
+	sourceOK   int
 }
 
 // phase is one entry in the graph.
@@ -117,6 +122,19 @@ func New(opt Options, h host.Info, con *ui.Console) (*Pipeline, error) {
 		return nil, fmt.Errorf("%q is not a domain name", opt.Target)
 	}
 	opt.Target = target
+	if opt.CrawlBudget < 0 || opt.CrawlBudget > 7*24*time.Hour {
+		return nil, fmt.Errorf("crawl budget must be positive and at most 168h")
+	}
+	if opt.ResumeCrawl {
+		if opt.Fresh || len(opt.Skip) > 0 || (len(opt.Only) > 0 && (len(opt.Only) != 1 || opt.Only[0] != "p7")) {
+			return nil, fmt.Errorf("--resume-crawl cannot be combined with --fresh, --skip, or phases other than p7")
+		}
+		opt.Only = []string{"p7"}
+	}
+	exclusions, err := ReadExclusions(opt.ExcludeFile)
+	if err != nil {
+		return nil, err
+	}
 
 	for _, id := range append(append([]string{}, opt.Only...), opt.Skip...) {
 		if PhaseTitle(id) == "" {
@@ -132,6 +150,7 @@ func New(opt Options, h host.Info, con *ui.Console) (*Pipeline, error) {
 	p := &Pipeline{
 		opt: opt, h: h, con: con, prof: prof,
 		only: idSet(opt.Only), skip: idSet(opt.Skip),
+		exclusions: exclusions,
 	}
 	if opt.DryRun {
 		// Paths are labels for the plan. Do not inspect, create or adopt any run.
@@ -168,15 +187,19 @@ func New(opt Options, h host.Info, con *ui.Console) (*Pipeline, error) {
 	}
 
 	p.L, p.st = l, st
+	if err := p.bindExclusions(); err != nil {
+		l.Cleanup()
+		return nil, err
+	}
 	p.run = &Runner{
-			LogDir: l.Logs,
-			DryRun: opt.DryRun,
-			// The tools inherit NO_COLOR so escape sequences stay out of the
-			// artifacts. A findings file with ANSI codes in it is not greppable and
-			// looks like corruption when pasted into a report.
-			Env: []string{"NO_COLOR=1"},
-			OnResult: p.recordResult,
-		}
+		LogDir: l.Logs,
+		DryRun: opt.DryRun,
+		// The tools inherit NO_COLOR so escape sequences stay out of the
+		// artifacts. A findings file with ANSI codes in it is not greppable and
+		// looks like corruption when pasted into a report.
+		Env:      []string{"NO_COLOR=1"},
+		OnResult: p.recordResult,
+	}
 	return p, nil
 }
 
@@ -224,6 +247,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			if err := p.st.Clear(ph.id); err != nil {
 				return err
 			}
+			if ph.id == "p7" && !p.opt.ResumeCrawl {
+				if err := p.clearCrawlProgress(); err != nil {
+					return err
+				}
+			}
 		}
 		if p.st.IsDone(ph.id) {
 			p.con.Phase(i+1, len(all), ph.title+" — already done")
@@ -259,6 +287,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 func (p *Pipeline) runPhase(ctx context.Context, ph phase) error {
 	p.phaseMu.Lock()
 	p.phaseErr = nil
+	p.sourceOK = 0
 	p.phaseMu.Unlock()
 	err := ph.fn(p, ctx)
 	if ctx.Err() != nil {
@@ -270,6 +299,16 @@ func (p *Pipeline) runPhase(ctx context.Context, ph phase) error {
 }
 
 func (p *Pipeline) recordResult(res Result) {
+	if res.Optional {
+		if res.Err != nil {
+			p.optionalWarning(formatCommand(res.Cmd) + ": " + res.Err.Error())
+		} else {
+			p.phaseMu.Lock()
+			p.sourceOK++
+			p.phaseMu.Unlock()
+		}
+		return
+	}
 	if res.Err == nil || res.TimedOut {
 		return // bounded commands deliberately keep their partial output
 	}
@@ -278,6 +317,25 @@ func (p *Pipeline) recordResult(res Result) {
 	if p.phaseErr == nil {
 		p.phaseErr = fmt.Errorf("%s failed: %w", formatCommand(res.Cmd), res.Err)
 	}
+}
+
+func (p *Pipeline) optionalWarning(message string) {
+	p.phaseMu.Lock()
+	defer p.phaseMu.Unlock()
+	f, err := os.OpenFile(p.L.Path("optional-warnings.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		p.phaseErr = errors.Join(p.phaseErr, err)
+		return
+	}
+	_, err = fmt.Fprintln(f, time.Now().Format(time.RFC3339), strings.ReplaceAll(message, "\n", " "))
+	closeErr := f.Close()
+	p.phaseErr = errors.Join(p.phaseErr, err, closeErr)
+}
+
+func (p *Pipeline) execOptional(ctx context.Context, label, name, out string, cmd ...string) Result {
+	r := p.derive()
+	r.Optional = true
+	return p.execOn(ctx, r, label, name, out, cmd...)
 }
 
 // finish rebuilds the merged view of everything on disk, compares it against the
@@ -501,7 +559,7 @@ func (p *Pipeline) mergeArtifacts(names []string) (*Set, error) {
 		}
 		out.Merge(s)
 	}
-	return out.InScope(p.opt.Target), nil
+	return p.allowed(out), nil
 }
 
 // save normalises, scope-filters and atomically writes one phase artifact from
@@ -521,7 +579,7 @@ func (p *Pipeline) save(dst string, srcs ...string) (int, error) {
 		}
 		s.Merge(loaded)
 	}
-	s = s.InScope(p.opt.Target)
+	s = p.allowed(s)
 	if err := s.WriteFile(dst); err != nil {
 		return 0, err
 	}
@@ -564,7 +622,7 @@ func (p *Pipeline) liveTargets() (string, []string, error) {
 		}
 		all = append(all, lines...)
 	}
-	all = KeepHTTP(all)
+	all = p.collectedURLs(all)
 	path := p.L.Temp("live_urls.txt")
 	if err := WriteLines(path, all); err != nil {
 		return "", nil, err

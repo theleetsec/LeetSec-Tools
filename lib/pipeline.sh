@@ -168,7 +168,11 @@ pipe_seed_previous() {
     local previous="$1" f
     for f in 01_passive.txt 02_brute.txt 03_recursive.txt 04_perms.txt \
              05_http.jsonl 05_live_urls.txt 06_ports.txt 06_extra_urls.txt \
-             07_urls.txt 07_crawled_hosts.txt master_dns.txt master_live_urls.txt; do
+             07_urls.txt 07_crawled_hosts.txt master_dns.txt master_live_urls.txt \
+             01_candidates.txt 01_unresolved.txt 07_candidates.txt 07_unresolved.txt \
+             07_katana_done_urls.txt 07_katana_urls.txt 07_wayback_urls.txt 07_gau_urls.txt \
+             07_wayback_complete 07_gau_complete 07_crawl_pending.txt \
+             07_katana_attempt.txt 07_wayback_attempt.txt 07_gau_attempt.txt; do
         [ -f "${previous}/${f}" ] || continue
         cp "${previous}/${f}" "${OUT_DIR}/${f}" || return 1
     done
@@ -270,7 +274,7 @@ pipe_rebuild_master() {
             | compat_bytes tr -d '\r' \
             | compat_bytes tr '[:upper:]' '[:lower:]' \
             | compat_bytes sed -e 's/^\*\.//' -e 's/^\.//' -e 's/\.$//' -e 's/[[:space:]]*$//' \
-            | pipe_filter_scope "$target" \
+            | pipe_collection_names "$target" \
             | compat_sort -u > "$out"
     fi
     printf '%s\n' "$(compat_count "$out")"
@@ -287,7 +291,7 @@ pipe_rebuild_seeds() {
         : > "$out"
     else
         cat "${parts[@]}" | compat_bytes tr -d '\r' | compat_bytes tr '[:upper:]' '[:lower:]' \
-            | pipe_filter_scope "$target" | compat_sort -u > "$out"
+            | pipe_collection_names "$target" | compat_sort -u > "$out"
     fi
     printf '%s\n' "$out"
 }
@@ -602,20 +606,37 @@ pipe_phase_passive() {
     if pipe_need subfinder "subfinder"; then
         ui_step_cfg "${LOG_DIR}/subfinder.log" "${WORK_DIR}/subfinder.txt"
         ui_run "subfinder" -- subfinder -d "$target" -all -silent -o "${WORK_DIR}/subfinder.txt" \
-            || PIPE_PHASE_FAILED=true
+            || pipe_optional_warning "subfinder failed; continuing other passive sources"
     fi
 
     if pipe_need assetfinder "assetfinder"; then
         ui_step_cfg "${LOG_DIR}/assetfinder.log" "${WORK_DIR}/assetfinder.txt"
-        ui_run_sh "assetfinder" 'assetfinder --subs-only "$PIPE_TARGET" > "$PIPE_WORK/assetfinder.txt"'
+        ui_run_sh "assetfinder" 'assetfinder --subs-only "$PIPE_TARGET" > "$PIPE_WORK/assetfinder.txt"' \
+            || pipe_optional_warning "assetfinder failed; continuing other passive sources"
     fi
 
     if pipe_need amass "amass"; then
-        # Bounded: amass passive on a large target can run for hours and the
-        # marginal yield after 10 minutes is small.
-        ui_step_cfg "${LOG_DIR}/amass.log" "${WORK_DIR}/amass.txt"
-        ui_run_sh "amass (10m budget)" \
-            'compat_timeout 600 amass enum -passive -d "$PIPE_TARGET" -o "$PIPE_WORK/amass.txt"'
+        # Both commands use the operator's configured default engine/database.
+        # v5 enum has no -o; subs -names is the machine-readable export.
+        local amass_rc=0
+        ui_step_cfg "${LOG_DIR}/amass.log" "${OUT_DIR}/amass-enum.stdout" "" true
+        ui_run_sh "amass enumeration (10m budget)" \
+            'COMPAT_TIMEOUT_SIGNAL=INT compat_timeout 600 amass enum -passive -d "$PIPE_TARGET" -nocolor > "$PIPE_OUT/amass-enum.stdout"' || amass_rc=$?
+        if [ "$amass_rc" -eq 0 ] || [ "$amass_rc" -eq 124 ]; then
+            ui_step_cfg "${LOG_DIR}/amass_subs.log" "${OUT_DIR}/amass-names.txt" "" true
+            ui_run_sh "Exporting amass discovered names" \
+                'compat_timeout 120 amass subs -names -d "$PIPE_TARGET" -nocolor > "$PIPE_OUT/amass-names.txt"' \
+                || pipe_optional_warning "amass export failed; see logs/amass_subs.log"
+            cp "${OUT_DIR}/amass-names.txt" "${WORK_DIR}/amass.txt" || return 1
+        else pipe_optional_warning "amass enumeration failed; see logs/amass.log"
+        fi
+    else pipe_optional_warning "amass not installed; continuing other passive sources"
+    fi
+
+    if pipe_need findomain "findomain"; then
+        ui_step_cfg "${LOG_DIR}/findomain.log" "${WORK_DIR}/findomain.txt" "" true
+        ui_run_sh "findomain" 'findomain -t "$PIPE_TARGET" -q > "$PIPE_WORK/findomain.txt"' \
+            || pipe_optional_warning "findomain failed; continuing other passive sources"
     fi
 
     if command -v jq >/dev/null 2>&1; then
@@ -663,28 +684,22 @@ _pipe_finish_passive() {
     # "$WORK_DIR"/*.txt` also swallowed resolvers.txt and, on a resumed run,
     # its own previous output.
     local src=() f
-    for f in subfinder assetfinder amass crtsh wayback; do
+    for f in subfinder assetfinder amass findomain crtsh wayback; do
         [ -s "${WORK_DIR}/${f}.txt" ] && src+=("${WORK_DIR}/${f}.txt")
     done
 
+    [ -s "${OUT_DIR}/01_candidates.txt" ] && src+=("${OUT_DIR}/01_candidates.txt")
     if [ "${#src[@]}" -eq 0 ]; then
         ui_warn "No passive sources returned data"
-        : > "$art"; pipe_mark_done p1; return 0
-    fi
-
-    cat "${src[@]}" | compat_bytes tr -d '\r' | compat_bytes tr '[:upper:]' '[:lower:]' \
-        | compat_bytes sed -e 's/^\*\.//' -e 's/[[:space:]]//g' \
-        | pipe_filter_scope "$target" | compat_sort -u > "$raw"
-    ui_detail "candidates" "$(compat_count "$raw")"
-
-    if [ -s "$raw" ] && pipe_need puredns "passive resolution"; then
-        ui_step_cfg "${LOG_DIR}/resolve_passive.log" "$art"
-        ui_run "Resolving passive candidates" -- \
-            puredns resolve "$raw" -r "$WL_RESOLVERS" -w "$art" \
-                --rate-limit "$DNS_RATE" --skip-wildcard-filter --skip-validation || return $?
+        : > "${OUT_DIR}/01_candidates.txt"
     else
-        cp "$raw" "$art"
+        cat "${src[@]}" | compat_bytes tr -d '\r' | compat_bytes tr '[:upper:]' '[:lower:]' \
+            | compat_bytes sed -e 's/^\*\.//' -e 's/[[:space:]]//g' \
+            | pipe_collection_names "$target" | compat_sort -u > "$raw" || return 1
+        cp "$raw" "${OUT_DIR}/01_candidates.txt" || return 1
     fi
+    ui_detail "candidates" "$(compat_count "${OUT_DIR}/01_candidates.txt")"
+    pipe_resolve_candidates "$target" "${OUT_DIR}/01_candidates.txt" "$art" 01 passive || return $?
 
     ui_detail "resolved" "$(compat_count "$art")"
     pipe_mark_done p1
@@ -777,7 +792,7 @@ WORKER
         'xargs -P "$REC_FANOUT" -n 1 "$REC_WORKER" < "$REC_TARGETS"' \
         || PIPE_PHASE_FAILED=true
 
-    cat "${WORK_DIR}"/rec/*.txt 2>/dev/null | pipe_filter_scope "$target" \
+    cat "${WORK_DIR}"/rec/*.txt 2>/dev/null | pipe_collection_names "$target" \
         | compat_sort -u > "$art"
     ui_detail "new hosts" "$(compat_count "$art")"
     pipe_mark_done p3
@@ -945,7 +960,7 @@ pipe_live_urls() {
         : > "$out"
     else
         cat "${parts[@]}" | compat_bytes tr -d '\r' | compat_bytes sed 's/[[:space:]]*$//' \
-            | compat_bytes grep -E '^https?://' | compat_sort -u > "$out" || true
+            | compat_bytes grep -E '^https?://' | pipe_apply_exclusions urls | compat_sort -u > "$out" || true
     fi
     printf '%s\n' "$out"
 }
@@ -959,56 +974,33 @@ pipe_live_urls() {
 # is why 07_crawled_hosts.txt is one of the inputs to pipe_rebuild_master.
 # ---------------------------------------------------------------------------
 pipe_phase_crawl() {
-    local target="$1"
-    local urls_art="${OUT_DIR}/07_urls.txt"
-    local hosts_art="${OUT_DIR}/07_crawled_hosts.txt"
-
+    local target="$1" urls_art="${OUT_DIR}/07_urls.txt" hosts_art="${OUT_DIR}/07_crawled_hosts.txt" crawl_rc=0
     if pipe_done p7; then ui_phase_cached 7 "$PIPE_PHASE_TOTAL" "Crawling"; return 0; fi
-
     local live; live=$(pipe_live_urls)
-    local n; n=$(compat_count "$live")
-    ui_phase 7 "$PIPE_PHASE_TOTAL" "Crawling" "${n} live services, concurrency ${KATANA_CONC}"
-
-    if [ "$n" -eq 0 ]; then
-        : > "$urls_art"; : > "$hosts_art"; pipe_mark_done p7; return 0
-    fi
-
-    : > "${WORK_DIR}/crawl_raw.txt"
-
-    if pipe_need katana "crawling"; then
-        # Bounded by wall clock as well as depth: katana on a large SPA can run
-        # indefinitely, and the original had no ceiling at all.
-        ui_step_cfg "${LOG_DIR}/katana.log" "${WORK_DIR}/katana.txt" "" true
-        KATANA_IN="$live" ui_run_sh "Crawling live services" '
-            compat_timeout 2700 katana -list "$KATANA_IN" -depth 2 -js-crawl \
-                -concurrency "$KATANA_CONC" -rate-limit 100 -timeout 10 \
-                -silent -no-color -o "$PIPE_WORK/katana.txt"' || PIPE_PHASE_FAILED=true
-    fi
-
-    if pipe_need waybackurls "archive mining"; then
-        ui_step_cfg "${LOG_DIR}/waybackurls.log" "${WORK_DIR}/wburls.txt" "" true
-        ui_run_sh "Mining archived URLs" '
-            printf "%s\n" "$PIPE_TARGET" | compat_timeout 600 waybackurls \
-                > "$PIPE_WORK/wburls.txt"' || PIPE_PHASE_FAILED=true
-    fi
-
-    _pipe_finish_crawl "$target" "$urls_art" "$hosts_art"
+    ui_phase 7 "$PIPE_PHASE_TOTAL" "Crawling" "$(compat_count "$live") live services"
+    pipe_crawl_urls "$live" || crawl_rc=$?
+    _pipe_finish_crawl "$target" "$urls_art" "$hosts_art" || return $?
+    [ "$crawl_rc" -eq 0 ] || return "$crawl_rc"
+    pipe_mark_done p7
 }
 
 _pipe_finish_crawl() {
     local target="$1" urls_art="$2" hosts_art="$3"
 
     local src=() f
-    for f in katana wburls; do
-        [ -s "${WORK_DIR}/${f}.txt" ] && src+=("${WORK_DIR}/${f}.txt")
+    for f in 07_katana_urls.txt 07_wayback_urls.txt 07_gau_urls.txt 07_urls.txt; do
+        [ -s "${OUT_DIR}/${f}" ] && src+=("${OUT_DIR}/${f}")
     done
 
     if [ "${#src[@]}" -eq 0 ]; then
-        : > "$urls_art"; : > "$hosts_art"; pipe_mark_done p7; return 0
+        : > "$urls_art"
+        [ -e "$hosts_art" ] || : > "$hosts_art"
+        return 0
     fi
 
     cat "${src[@]}" | compat_bytes tr -d '\r' | compat_bytes grep -E '^https?://' \
-        | compat_sort -u > "$urls_art" || true
+        | pipe_apply_exclusions urls | compat_sort -u > "${urls_art}.part" || return 1
+    mv "${urls_art}.part" "$urls_art" || return 1
     ui_detail "URLs" "$(compat_count "$urls_art")"
 
     # Host extraction: strip scheme, then everything from the first / or : on.
@@ -1023,7 +1015,7 @@ _pipe_finish_crawl() {
     compat_bytes sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|[/?#].*$||' -e 's|^.*@||' \
         -e 's|:[0-9]*$||' "$urls_art" \
         | compat_bytes tr '[:upper:]' '[:lower:]' \
-        | pipe_filter_scope "$target" | compat_sort -u > "$cand" || true
+        | pipe_collection_names "$target" | compat_sort -u > "$cand" || true
 
     # Only names that are not already known need a resolution pass, but that
     # difference must NOT become the artifact. Re-running this phase against the
@@ -1048,22 +1040,18 @@ _pipe_finish_crawl() {
         : > "$known"
     fi
 
-    local resolved="${WORK_DIR}/crawl_resolved.txt"
-    : > "$resolved"
-    if [ -s "$new" ] && pipe_need puredns "crawled-host resolution"; then
-        ui_step_cfg "${LOG_DIR}/resolve_crawled.log" "$resolved"
-        ui_run "Resolving $(compat_count "$new") crawled hostnames" -- \
-            puredns resolve "$new" -r "$WL_RESOLVERS" -w "$resolved" \
-                --rate-limit "$DNS_RATE" --skip-wildcard-filter --skip-validation || return $?
-    elif [ -s "$new" ]; then
-        cp "$new" "$resolved"
-    fi
-
-    cat "$known" "$resolved" | compat_sort -u > "$hosts_art"
+    local resolved="${WORK_DIR}/crawl_resolved.txt" resolve_rc=0
+    # Preserve every observed candidate, including names still unresolved.
+    { cat "$cand"; if [ -f "${OUT_DIR}/07_candidates.txt" ]; then cat "${OUT_DIR}/07_candidates.txt"; fi; } | pipe_collection_names "$target" | compat_sort -u > "${cand}.part" || return 1
+    mv "${cand}.part" "${OUT_DIR}/07_candidates.txt" || return 1
+    pipe_resolve_candidates "$target" "${OUT_DIR}/07_candidates.txt" "$resolved" 07 crawled || resolve_rc=$?
+    { cat "$known" "$resolved"; if [ -f "$hosts_art" ]; then cat "$hosts_art"; fi; } | pipe_collection_names "$target" | compat_sort -u > "${hosts_art}.part" || return 1
+    mv "${hosts_art}.part" "$hosts_art" || return 1
+    [ "$resolve_rc" -eq 0 ] || return "$resolve_rc"
 
     ui_detail "hosts seen in crawl" "$(compat_count "$hosts_art")"
     ui_detail "new to this target"  "$(compat_count "$resolved")"
-    pipe_mark_done p7
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1238,6 +1226,13 @@ pipe_write_report() {
         printf '| Crawled URLs | %s | `07_urls.txt` |\n' "$n_urls"
         printf '| Vulnerability findings | %s | `reports/nuclei.txt` |\n' "$n_vulns"
         printf '| New since previous run | %s | `reports/new_since_last_run.txt` |\n' "$n_new"
+        printf '| Passive candidates retained | %s | `01_candidates.txt` |\n' "$(compat_count "${OUT_DIR}/01_candidates.txt")"
+        printf '| Passive candidates unresolved | %s | `01_unresolved.txt` |\n' "$(compat_count "${OUT_DIR}/01_unresolved.txt")"
+        printf '| Crawl candidates retained | %s | `07_candidates.txt` |\n' "$(compat_count "${OUT_DIR}/07_candidates.txt")"
+        printf '| Crawl candidates unresolved | %s | `07_unresolved.txt` |\n' "$(compat_count "${OUT_DIR}/07_unresolved.txt")"
+        printf '| Optional source warnings | %s | `optional-warnings.log` |\n' "$(compat_count "${OUT_DIR}/optional-warnings.log")"
+        printf '| Pending crawl sources | %s | `07_crawl_pending.txt` |\n' "$(compat_count "${OUT_DIR}/07_crawl_pending.txt")"
+        printf '\nOptional source warnings do not invalidate successful enumeration. Unresolved candidates remain separate from resolved output. Continue saved crawl work with `--resume-crawl --crawl-budget 2h` and the same collection exclusion file.\n'
         _pipe_report_findings
         printf '\n---\n\nGenerated by LeetEnum. LeetSecurity LLC.\n'
     } > "$md"
@@ -1324,6 +1319,7 @@ pipe_run() {
     [ "${PIPE_ARG_FRESH:-false}" = "true" ] && pipe_reset
     ui_set_logfile "${LOG_DIR}/leetenum.log"
 
+    pipe_bind_exclusions || return 1
     pipe_select_profile "$PIPE_ARG_PROFILE"
     pipe_prepare_wordlists
     pipe_export_env "$target"
@@ -1366,7 +1362,10 @@ pipe_dispatch() {
         case ",${PIPE_ARG_SKIP}," in *",${id},"*) ui_info "Skipping ${id} on request"; return 0 ;; esac
     fi
     # Re-running an explicitly requested phase should actually re-run it.
-    if [ -n "${PIPE_ARG_ONLY:-}" ]; then rm -f "${STATE_DIR}/${id}.done"; fi
+    if [ -n "${PIPE_ARG_ONLY:-}" ]; then
+        rm -f "${STATE_DIR}/${id}.done"
+        if [ "$id" = p7 ] && [ "${PIPE_ARG_RESUME_CRAWL:-false}" != true ]; then pipe_clear_crawl_progress || return 1; fi
+    fi
 
     PIPE_PHASE_FAILED=false
     local rc=0

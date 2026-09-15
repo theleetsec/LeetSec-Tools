@@ -285,14 +285,18 @@ compat_realpath() {
 # function defined here would otherwise be invisible.
 compat_timeout() {
     local secs="$1"; shift
+    local signal="TERM"
+    [ "${COMPAT_TIMEOUT_SIGNAL:-TERM}" = "INT" ] && signal="INT"
     if [ -n "${LS_TIMEOUT_BIN:-}" ]; then
-        "$LS_TIMEOUT_BIN" "$secs" "$@"
+        "$LS_TIMEOUT_BIN" -k 5 -s "$signal" "$secs" "$@"
         return $?
     fi
 
     exec 9<&0
     "$@" <&9 &
     local cmd_pid=$!
+    local expired
+    expired=$(mktemp "${TMPDIR:-/tmp}/leetenum-deadline.XXXXXX") || { kill -TERM "$cmd_pid" 2>/dev/null; return 1; }
     exec 9<&-
     (
         # Plain names, not `local`: this is a subshell, and polling `kill -0`
@@ -303,7 +307,8 @@ compat_timeout() {
             sleep 1
             _dog_left=$(( _dog_left - 1 ))
         done
-        kill -TERM "$cmd_pid" 2>/dev/null || true
+        printf 'expired\n' > "$expired"
+        kill "-${signal}" "$cmd_pid" 2>/dev/null || true
         sleep 5
         kill -KILL "$cmd_pid" 2>/dev/null || true
     ) &
@@ -317,6 +322,8 @@ compat_timeout() {
     kill -KILL "$dog_pid" 2>/dev/null || true
     wait "$dog_pid" 2>/dev/null || true
     case "$rc" in 137|143) rc=124 ;; esac
+    [ -s "$expired" ] && rc=124
+    rm -f "$expired"
     return "$rc"
 }
 export -f compat_timeout

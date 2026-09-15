@@ -35,7 +35,7 @@ import (
 
 // version is overridden at build time with -ldflags "-X main.version=...", so a
 // release binary reports the tag it was cut from rather than whatever was hardcoded.
-var version = "1.0.0"
+var version = "1.1.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -106,6 +106,8 @@ type scanFlags struct {
 	deep, fresh, offline       bool
 	monitor, dry, noColor      bool
 	subs                       bool
+	excludeFile, crawlBudget   string
+	resumeCrawl                bool
 }
 
 func (f *scanFlags) register(fs *flag.FlagSet) {
@@ -137,6 +139,9 @@ func (f *scanFlags) register(fs *flag.FlagSet) {
 	boolean(&f.dry, "dry-run", "", "print the commands and execute nothing")
 	boolean(&f.noColor, "no-color", "", "disable colour (NO_COLOR is also honoured)")
 	boolean(&f.subs, "subs", "", "subdomain hunt only: skip ports, nuclei, screenshots")
+	str(&f.excludeFile, "", "exclude-file", "", "collection exclusions: exact names or *.suffix patterns")
+	str(&f.crawlBudget, "", "crawl-budget", "", "crawl source budget: whole seconds/minutes/hours, e.g. 2h")
+	boolean(&f.resumeCrawl, "resume-crawl", "", "continue only crawling from saved progress")
 }
 
 func cmdScan(args []string) error {
@@ -214,18 +219,25 @@ var errSilent = errors.New("")
 // directory, its own state and its own transcript, so a file of fifty domains is fifty
 // independent scans rather than one merged result set.
 func scanOne(ctx context.Context, con *ui.Console, h host.Info, f scanFlags, target string) error {
+	crawlBudget, err := scan.ParseCrawlBudget(f.crawlBudget)
+	if err != nil {
+		return err
+	}
 	p, err := scan.New(scan.Options{
-		Target:   target,
-		OutRoot:  f.out,
-		Profile:  f.profile,
-		Wordlist: f.wordlist,
-		Deep:     f.deep,
-		Fresh:    f.fresh,
-		Offline:  f.offline,
-		Only:     phaseIDs(f.only),
-		Skip:     phaseIDs(f.skip),
-		DryRun:   f.dry,
-		SubsOnly: f.subs,
+		Target:      target,
+		OutRoot:     f.out,
+		Profile:     f.profile,
+		Wordlist:    f.wordlist,
+		Deep:        f.deep,
+		Fresh:       f.fresh,
+		Offline:     f.offline,
+		Only:        phaseIDs(f.only),
+		Skip:        phaseIDs(f.skip),
+		DryRun:      f.dry,
+		SubsOnly:    f.subs,
+		ExcludeFile: f.excludeFile,
+		CrawlBudget: crawlBudget,
+		ResumeCrawl: f.resumeCrawl,
 	}, h, con)
 	if err != nil {
 		return err
@@ -595,6 +607,9 @@ SCAN OPTIONS
                            HTTP, crawl, deepen). Skip ports, nuclei, screenshots
       --dry-run            print the commands and execute nothing
       --no-color           disable colour (NO_COLOR is honoured too)
+      --exclude-file <path> collection filters: exact names or *.suffix, one per line
+      --crawl-budget <dur>  Katana/archive budget, e.g. 2h (default: Katana scales)
+      --resume-crawl        continue only p7, keeping completed seed batches and URLs
 
 PHASES
 %s

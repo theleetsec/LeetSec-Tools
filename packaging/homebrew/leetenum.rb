@@ -4,7 +4,7 @@
 #
 #   mkdir -p Formula
 #   curl -fsSL -o Formula/leetenum.rb \
-#     https://github.com/theleetsec/LeetSec-Tools/releases/download/v1.0.0/leetenum.rb
+#     https://github.com/theleetsec/LeetSec-Tools/releases/download/v1.1.0/leetenum.rb
 #   brew install --build-from-source ./Formula/leetenum.rb
 #
 # A copy is kept here so the formula is versioned alongside the code it
@@ -23,7 +23,7 @@
 class Leetenum < Formula
   desc "Reconnaissance pipeline for authorised security assessments"
   homepage "https://github.com/theleetsec/LeetSec-Tools"
-  url "https://github.com/theleetsec/LeetSec-Tools/archive/refs/tags/v1.0.0.tar.gz"
+  url "https://github.com/theleetsec/LeetSec-Tools/archive/refs/tags/v1.1.0.tar.gz"
   # Replaced by CI on release; `brew fetch --build-from-source` prints the value.
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"

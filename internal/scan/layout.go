@@ -162,6 +162,8 @@ func NewLayout(target, outRoot string, fresh bool, h host.Info) (*Layout, error)
 func (l *Layout) CopyInputs(previous string) error {
 	names := append(append([]string{}, masterInputs...),
 		"05_http.jsonl", "05_live_urls.txt", "06_ports.txt", "06_extra_urls.txt", "07_urls.txt")
+	names = append(names, crawlProgressFiles...)
+	names = append(names, "01_candidates.txt", "01_unresolved.txt", "07_candidates.txt", "07_unresolved.txt")
 	for _, name := range names {
 		src, err := os.Open(filepath.Join(previous, name))
 		if os.IsNotExist(err) {

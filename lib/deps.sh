@@ -37,7 +37,7 @@ DEPS_GO_TOOLS=(
 )
 
 # Tools that must exist for a scan to produce anything at all.
-DEPS_REQUIRED=(subfinder puredns httpx massdns)
+DEPS_REQUIRED=(subfinder puredns httpx massdns dnsx)
 
 # System packages, keyed by package manager where names differ.
 deps_sys_pkg() {

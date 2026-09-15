@@ -16,7 +16,7 @@
 # `set -u` still catches genuine typos.
 set -uo pipefail
 
-LEETENUM_VERSION="1.0.0"
+LEETENUM_VERSION="1.1.0"
 
 # ---------------------------------------------------------------------------
 # Self-location.
@@ -38,7 +38,7 @@ _ls_self() {
 LS_ROOT=$(_ls_self)
 LS_LIB="${LEETENUM_LIB_DIR:-${LS_ROOT}/lib}"
 
-for _m in compat ui config deps pipeline; do
+for _m in compat ui config deps pipeline hardening; do
     if [ ! -r "${LS_LIB}/${_m}.sh" ]; then
         printf 'leetenum: cannot find %s/%s.sh\n' "$LS_LIB" "$_m" >&2
         printf 'Set LEETENUM_LIB_DIR or reinstall.\n' >&2
@@ -72,6 +72,9 @@ PIPE_ARG_DEEP="false"
 PIPE_ARG_FRESH="false"
 PIPE_ARG_ONLY=""
 PIPE_ARG_SKIP=""
+PIPE_ARG_EXCLUDE_FILE=""
+PIPE_ARG_CRAWL_BUDGET=""
+PIPE_ARG_RESUME_CRAWL="false"
 ARG_INTERVAL=21600          # 6h, used only in monitor mode
 ARG_TARGET_FILE=""
 ARG_YES="false"
@@ -101,6 +104,9 @@ SCAN OPTIONS
       --fresh               ignore checkpoints and start over
       --only <p1,p5>        run only these phases
       --skip <p6,p9>       run everything except these phases
+      --exclude-file <path> collection filters: exact names or *.suffix, one per line
+      --crawl-budget <dur>  Katana/archive budget, e.g. 2h (default: Katana scales)
+      --resume-crawl        continue only p7 using saved seed batches and URLs
   -m, --monitor             loop continuously, reporting only what is new
       --interval <seconds>  monitor sleep between runs (default: 21600)
   -y, --yes                 never prompt; assume defaults
@@ -174,6 +180,9 @@ parse_args() {
             -p|--profile)  need_value "$1" "${2:-}"; PIPE_ARG_PROFILE="$2"; shift 2 ;;
             --only)        need_value "$1" "${2:-}"; PIPE_ARG_ONLY="$2";    shift 2 ;;
             --skip)        need_value "$1" "${2:-}"; PIPE_ARG_SKIP="$2";    shift 2 ;;
+            --exclude-file) need_value "$1" "${2:-}"; PIPE_ARG_EXCLUDE_FILE="$2"; shift 2 ;;
+            --crawl-budget) need_value "$1" "${2:-}"; PIPE_ARG_CRAWL_BUDGET="$2"; shift 2 ;;
+            --resume-crawl) PIPE_ARG_RESUME_CRAWL="true"; shift ;;
             --interval)    need_value "$1" "${2:-}"; ARG_INTERVAL="$2";     shift 2 ;;
             -m|--monitor)  PIPE_ARG_MONITOR="true"; shift ;;
             --deep)        PIPE_ARG_DEEP="true"; shift ;;
@@ -195,6 +204,18 @@ parse_args() {
         || arg_die "--interval must be a whole number of seconds"
     validate_phase_list --only "$PIPE_ARG_ONLY"
     validate_phase_list --skip "$PIPE_ARG_SKIP"
+    if [ -n "$PIPE_ARG_CRAWL_BUDGET" ]; then
+        pipe_parse_crawl_budget "$PIPE_ARG_CRAWL_BUDGET" >/dev/null || arg_die "--crawl-budget: use positive whole seconds/minutes/hours, at most 168h"
+    fi
+    if [ "$PIPE_ARG_RESUME_CRAWL" = "true" ]; then
+        [ "$PIPE_ARG_FRESH" = "false" ] && [ -z "$PIPE_ARG_SKIP" ] && \
+            { [ -z "$PIPE_ARG_ONLY" ] || [ "$PIPE_ARG_ONLY" = "p7" ]; } \
+            || arg_die "--resume-crawl conflicts with --fresh, --skip or phases other than p7"
+        PIPE_ARG_ONLY="p7"
+    fi
+    if [ -n "$PIPE_ARG_EXCLUDE_FILE" ]; then
+        pipe_read_exclusions "$PIPE_ARG_EXCLUDE_FILE" >/dev/null || arg_die "invalid or unreadable --exclude-file"
+    fi
 }
 
 # Catching `--only 6` or `--only phase6` here saves a user from a scan that

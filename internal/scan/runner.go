@@ -38,6 +38,9 @@ type Runner struct {
 	// DryRun records the command and returns success without executing it, which
 	// is what makes the phase graph testable without a toolchain.
 	DryRun bool
+	// Optional commands report degradation without invalidating the phase.
+	Optional          bool
+	InterruptOnCancel bool // let bounded tools flush state before forced termination
 	// OnResult receives every command outcome, including commands run by workers.
 	// The pipeline uses it to keep a failed command from receiving a checkpoint.
 	OnResult func(Result)
@@ -55,6 +58,7 @@ type Result struct {
 	Lines    int // lines the command wrote to stdout, when captured to a file
 	Took     time.Duration
 	TimedOut bool // a command budget expired; parent cancellation is different
+	Optional bool
 }
 
 // Executed returns the commands this runner ran, in order, for tests and for the
@@ -80,6 +84,7 @@ func (r *Runner) record(cmd []string) {
 // and nobody notices why.
 func (r *Runner) Run(ctx context.Context, name string, outPath string, cmd ...string) (res Result) {
 	res.Cmd = cmd
+	res.Optional = r.Optional
 	started := time.Now()
 	defer func() {
 		res.Took = time.Since(started)
@@ -103,6 +108,10 @@ func (r *Runner) Run(ctx context.Context, name string, outPath string, cmd ...st
 	}
 
 	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	if r.InterruptOnCancel {
+		c.Cancel = func() error { return c.Process.Signal(os.Interrupt) }
+		c.WaitDelay = 5 * time.Second
+	}
 	c.Env = append(os.Environ(), r.Env...)
 	if r.Stdin != nil {
 		c.Stdin = r.Stdin

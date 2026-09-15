@@ -82,7 +82,7 @@ jobs:
           }
           pattern='(^|[;&|(][[:space:]]*|[[:space:]]|'"'"')(timeout|nproc|free|tac|sha256sum|md5sum|realpath|readlink -f|sed -i|xargs -r|find [^|]*-printf)[[:space:]]'
           hits=0
-          for f in leetenum.sh lib/config.sh lib/deps.sh lib/pipeline.sh lib/ui.sh; do
+          for f in leetenum.sh lib/config.sh lib/deps.sh lib/pipeline.sh lib/hardening.sh lib/ui.sh; do
             # grep's status, not the pipeline's, decides whether this file matched.
             out=$(strip "$f" | grep -nE "$pattern") || continue
             printf '%s\n' "$out" | sed "s|^|${f}:|"

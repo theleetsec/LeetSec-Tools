@@ -1,7 +1,9 @@
 package scan
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,7 +34,7 @@ func (p *Pipeline) phasePassive(ctx context.Context) error {
 
 	if p.need("subfinder", "subfinder") {
 		out := p.L.Temp("subfinder.txt")
-		p.exec(ctx, "subfinder", "subfinder", "",
+		p.execOptional(ctx, "subfinder", "subfinder", "",
 			"subfinder", "-d", p.opt.Target, "-all", "-silent", "-o", out)
 		p.absorb(candidates, out)
 	}
@@ -41,25 +43,16 @@ func (p *Pipeline) phasePassive(ctx context.Context) error {
 		// assetfinder has no output flag; the runner captures stdout to the file,
 		// which is where the shell version needed a redirect and therefore a shell.
 		out := p.L.Temp("assetfinder.txt")
-		p.exec(ctx, "assetfinder", "assetfinder", out,
+		p.execOptional(ctx, "assetfinder", "assetfinder", out,
 			"assetfinder", "--subs-only", p.opt.Target)
 		p.absorb(candidates, out)
 	}
 
-	if p.need("amass", "amass") {
-		// Bounded at ten minutes: amass passive against a large organisation runs for
-		// hours and the marginal yield after ten minutes is close to nothing.
-		bctx, cancel := budget(ctx, 10*time.Minute)
-		out := p.L.Temp("amass.txt")
-		p.exec(bctx, "amass (10m budget)", "amass", "",
-			"amass", "enum", "-passive", "-d", p.opt.Target, "-o", out)
-		cancel()
-		p.absorb(candidates, out)
-	}
+	p.amass(ctx, candidates)
 
 	if p.need("findomain", "findomain") {
 		out := p.L.Temp("findomain.txt")
-		p.exec(ctx, "findomain", "findomain", out,
+		p.execOptional(ctx, "findomain", "findomain", out,
 			"findomain", "-t", p.opt.Target, "-q")
 		p.absorb(candidates, out)
 	}
@@ -67,6 +60,12 @@ func (p *Pipeline) phasePassive(ctx context.Context) error {
 	p.pullAPIs(ctx, candidates)
 	p.fromAPI(ctx, candidates, "DNS records (NS/MX/TXT/SPF)", DNSIntel)
 	p.fromAPI(ctx, candidates, "DNS zone transfer", AXFR)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if candidates.Len() == 0 && p.sourceOK == 0 {
+		return fmt.Errorf("no passive source completed successfully; see optional-warnings.log")
+	}
 
 	p.con.SetStat("names", candidates.Len())
 	return p.resolveInto(ctx, art, candidates, "passive")
@@ -102,11 +101,13 @@ func (p *Pipeline) pullAPIs(ctx context.Context, into *Set) {
 	ok := 0
 	for r := range ch {
 		if r.err != nil || r.set == nil {
+			p.optionalWarning(r.label + ": source unavailable")
 			continue
 		}
-		n := into.Merge(r.set)
+		n := into.Merge(p.allowed(r.set))
 		added += n
 		ok++
+		p.sourceOK++
 	}
 	st.OK(fmt.Sprintf("%d sources, %d new names", ok, added))
 	p.con.SetStat("names", into.Len())
@@ -116,12 +117,23 @@ func (p *Pipeline) pullAPIs(ctx context.Context, into *Set) {
 // a tool that failed has already reported so through its step line, and losing the
 // other four sources because one of them did not run is not a trade worth making.
 func (p *Pipeline) absorb(into *Set, path string) {
-	s, err := LoadSet(path)
+	f, err := os.Open(path)
 	if err != nil {
 		p.con.Warn(fmt.Sprintf("could not read %s: %v", filepath.Base(path), err))
 		return
 	}
-	into.Merge(s)
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		n := Normalise(sc.Text())
+		if InScope(n, p.opt.Target) && !p.excluded(n) {
+			into.Add(n)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		p.optionalWarning(filepath.Base(path) + ": " + err.Error())
+	}
 }
 
 // fromAPI runs one in-process source inside a console step, so an HTTP query looks
@@ -139,54 +151,12 @@ func (p *Pipeline) fromAPI(ctx context.Context, into *Set, label string,
 		// A passive source being unreachable is routine — crt.sh rate limits, the
 		// archive times out — and is not a reason to fail the phase.
 		st.Failed(err.Error())
+		p.optionalWarning(label + ": " + err.Error())
 		return
 	}
-	into.Merge(found)
+	into.Merge(p.allowed(found))
+	p.sourceOK++
 	st.OK(fmt.Sprintf("%d names", found.Len()))
-}
-
-// resolveInto turns a candidate set into a resolved artifact.
-//
-// Candidates are written out and handed to puredns, whose output becomes the
-// artifact. Without puredns the candidates are kept as-is and the phase says so: an
-// unresolved name is still a lead, and discarding the whole phase because one tool is
-// missing is worse than reporting names that may not answer.
-func (p *Pipeline) resolveInto(ctx context.Context, art string, candidates *Set, what string) error {
-	p.con.Detail("candidates", candidates.Len())
-	if candidates.Len() == 0 {
-		p.con.Warn("No " + what + " sources returned anything")
-		return p.empty(art)
-	}
-
-	in := p.L.Temp(what + "_candidates.txt")
-	if err := candidates.WriteFile(in); err != nil {
-		return err
-	}
-	if !p.need("puredns", what+" resolution") {
-		n, err := p.save(art, in)
-		if err != nil {
-			return err
-		}
-		p.con.Detail("kept unresolved", n)
-		return nil
-	}
-
-	out := p.L.Temp(what + "_resolved.txt")
-	// --skip-wildcard-filter is right for a candidate list: these names came from
-	// certificates and archives, so a wildcard zone is information rather than noise,
-	// and the filter would drop every one of them.
-	p.exec(ctx, "Resolving "+itoa(candidates.Len())+" "+what+" candidates", "resolve_"+what, "",
-		"puredns", "resolve", in,
-		"-r", p.wl.Resolvers, "-w", out,
-		"--rate-limit", itoa(p.prof.DNSRate),
-		"--skip-wildcard-filter", "--skip-validation")
-
-	n, err := p.save(art, out)
-	if err != nil {
-		return err
-	}
-	p.con.Detail("resolved", n)
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -320,9 +290,9 @@ func recursionParents(seeds *Set, limit int) []string {
 // main log directory and a failing parent can still be traced.
 func (p *Pipeline) recurse(ctx context.Context, parents []string, words, outDir string) error {
 	child := &Runner{
-		LogDir: filepath.Join(p.L.Logs, "recursive"),
-		DryRun: p.opt.DryRun,
-		Env:    p.run.Env,
+		LogDir:   filepath.Join(p.L.Logs, "recursive"),
+		DryRun:   p.opt.DryRun,
+		Env:      p.run.Env,
 		OnResult: p.recordResult,
 	}
 	rate := itoa(p.prof.DNSRatePerWorker())
@@ -511,13 +481,13 @@ func (p *Pipeline) tlsNames(ctx context.Context) {
 		return
 	}
 	out := p.L.Temp("tlsx.txt")
-	p.exec(ctx, "Reading TLS SAN/CN names", "tlsx", out,
+	p.execOptional(ctx, "Reading TLS SAN/CN names", "tlsx", out,
 		"tlsx", "-l", p.L.Master(), "-san", "-cn", "-silent")
 	s, err := LoadSet(out)
 	if err != nil || s.Len() == 0 {
 		return
 	}
-	s = s.InScope(p.opt.Target)
+	s = p.allowed(s)
 	art := p.L.Path("05_tls_hosts.txt")
 	_ = s.WriteFile(art)
 	p.con.Detail("tls names", s.Len())
@@ -626,60 +596,21 @@ func (p *Pipeline) phaseCrawl(ctx context.Context) error {
 
 	if len(live) == 0 {
 		p.con.Warn("No live services were found, so there is nothing to crawl")
-		return p.empty(urlArt, hostArt)
 	}
 
-	urls := KeepHTTP(p.crawlURLs(ctx, liveFile))
+	urls, crawlErr := p.crawlURLs(ctx, liveFile)
+	urls = p.collectedURLs(urls)
+	previous, err := LoadLines(urlArt)
+	if err != nil {
+		return err
+	}
+	urls = p.collectedURLs(append(urls, previous...))
 	if err := WriteLines(urlArt, urls); err != nil {
 		return err
 	}
 	p.con.Detail("URLs collected", len(urls))
 
-	return p.crawledHosts(ctx, urls, hostArt)
-}
-
-// crawlURLs gathers URLs from the two sources that produce them, keeping whatever
-// either one returns. Both are bounded, and for the same reason: katana against a
-// single-page application follows generated links until something stops it, and the
-// archive holds tens of millions of rows for a large domain.
-func (p *Pipeline) crawlURLs(ctx context.Context, liveFile string) []string {
-	var out []string
-
-	if p.need("katana", "crawling") {
-		f := p.L.Temp("katana.txt")
-		bctx, cancel := budget(ctx, 45*time.Minute)
-		p.exec(bctx, "Crawling live services (45m budget)", "katana", "",
-			"katana", "-list", liveFile, "-depth", "2", "-js-crawl",
-			"-concurrency", itoa(p.prof.KatanaConc), "-rate-limit", "100",
-			"-timeout", "10", "-silent", "-no-color", "-o", f)
-		cancel()
-		out = append(out, p.lines(f)...)
-	}
-
-	if p.need("waybackurls", "archived URL mining") {
-		f := p.L.Temp("wayback.txt")
-		bctx, cancel := budget(ctx, 10*time.Minute)
-		// waybackurls has no target flag; it reads domains from standard input. The
-		// runner feeds it directly, which is why Runner has a Stdin field instead of
-		// this phase having a shell to write `echo target |` with.
-		r := p.derive()
-		r.Stdin = strings.NewReader(p.opt.Target + "\n")
-		p.execOn(bctx, r, "Mining archived URLs (10m budget)", "waybackurls", f, "waybackurls")
-		cancel()
-		out = append(out, p.lines(f)...)
-	}
-
-	if p.need("gau", "gau URL archive") {
-		f := p.L.Temp("gau.txt")
-		bctx, cancel := budget(ctx, 10*time.Minute)
-		r := p.derive()
-		r.Stdin = strings.NewReader(p.opt.Target + "\n")
-		p.execOn(bctx, r, "gau (10m budget)", "gau", f,
-			"gau", "--subs", "--threads", "5")
-		cancel()
-		out = append(out, p.lines(f)...)
-	}
-	return out
+	return errors.Join(crawlErr, p.crawledHosts(ctx, urls, hostArt))
 }
 
 // execOn is exec on a runner other than the shared one, for the two commands that
@@ -721,7 +652,12 @@ func (p *Pipeline) lines(path string) []string {
 // remembering anything, every host this phase had ever found vanished from the final
 // results. TestArtifactIsKnownPlusNew is there to stop that returning.
 func (p *Pipeline) crawledHosts(ctx context.Context, urls []string, art string) error {
-	hosts := HostsOf(urls, p.opt.Target)
+	hosts := p.allowed(HostsOf(urls, p.opt.Target))
+	previous, err := LoadSet(p.L.Path("07_candidates.txt"))
+	if err != nil {
+		return err
+	}
+	hosts.Merge(p.allowed(previous))
 	p.con.Detail("hostnames in URLs", hosts.Len())
 	if hosts.Len() == 0 {
 		return p.empty(art)
@@ -739,15 +675,24 @@ func (p *Pipeline) crawledHosts(ctx context.Context, urls []string, art string) 
 	// Only the new names are resolved — re-resolving thousands of hosts that phases 1
 	// to 4 already confirmed is pure cost — but the known ones are still written out,
 	// because the artifact has to describe everything this phase found, not the delta.
-	out := known
-	if unknown.Len() > 0 {
-		verified, err := p.resolveNames(ctx, unknown)
+	out, err := LoadSet(art)
+	if err != nil {
+		return err
+	}
+	out = p.allowed(out)
+	out.Merge(known)
+	if hosts.Len() > 0 {
+		verified, err := p.resolveNames(ctx, hosts)
 		if err != nil {
+			if verified != nil {
+				out.Merge(verified)
+				err = errors.Join(err, out.WriteFile(art))
+			}
 			return err
 		}
 		out.Merge(verified)
 	}
-	if err := out.InScope(p.opt.Target).WriteFile(art); err != nil {
+	if err := p.allowed(out).WriteFile(art); err != nil {
 		return err
 	}
 	p.con.Detail("hosts contributed", CountLines(art))
@@ -799,32 +744,9 @@ func (p *Pipeline) deepen(ctx context.Context) error {
 	return nil
 }
 
-// resolveNames runs a candidate set through puredns and returns whatever answered.
-//
-// Without puredns — or when it fails — the candidates come back unchanged, and the
-// console says which happened. These names were extracted from the target's own
-// responses, so an unresolved one is a lead rather than an invention; that is the
-// difference between this and phase 4, where unresolved output is only ever noise.
+// resolveNames shares the durable candidate recovery path with passive intel.
 func (p *Pipeline) resolveNames(ctx context.Context, names *Set) (*Set, error) {
-	if !p.need("puredns", "verifying crawled hostnames") {
-		p.con.Detail("kept unresolved", names.Len())
-		return names, nil
-	}
-	in := p.L.Temp("crawled_candidates.txt")
-	if err := names.WriteFile(in); err != nil {
-		return nil, err
-	}
-	out := p.L.Temp("crawled_resolved.txt")
-	res := p.exec(ctx, "Resolving "+itoa(names.Len())+" crawled hostnames", "resolve_crawled", "",
-		"puredns", "resolve", in,
-		"-r", p.wl.Resolvers, "-w", out,
-		"--rate-limit", itoa(p.prof.DNSRate),
-		"--skip-wildcard-filter", "--skip-validation")
-	if res.Err != nil {
-		p.con.Detail("kept unresolved", names.Len())
-		return names, nil
-	}
-	return LoadSet(out)
+	return p.resolveCandidates(ctx, names, "crawled")
 }
 
 // ---------------------------------------------------------------------------

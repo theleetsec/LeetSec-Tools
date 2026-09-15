@@ -12,6 +12,7 @@
 set -u
 
 name=$(basename "$0")
+if [ -n "${FAKE_TOOL_TRACE:-}" ]; then printf '%s' "$name" >> "$FAKE_TOOL_TRACE"; printf ' %s' "$@" >> "$FAKE_TOOL_TRACE"; printf '\n' >> "$FAKE_TOOL_TRACE"; fi
 
 # Pull a flag's value out of the argument list without caring about order.
 flagval() {
@@ -44,10 +45,14 @@ firstpos() {
 
 case "$name" in
     subfinder)
+        [ "${FAKE_SUBFINDER_FAIL:-0}" = 1 ] && { printf 'source unavailable\n' >&2; exit 42; }
         d=$(flagval -d "$@") || exit 1
         out=$(flagval -o "$@") || out="/dev/stdout"
         printf 'www.%s\napi.%s\ndev.%s\nstaging.%s\nnot%s.attacker.net\n' \
             "$d" "$d" "$d" "$d" "$d" > "$out"
+        if [ "${FAKE_EXTRA_NAMES:-0}" = 1 ]; then
+            printf 'bulk-miss.%s\naaaa-only.%s\n_service.%s\nnx.%s\ncustomer.mx.saas.%s\nmx.saas.%s\nmail.other.%s\n' "$d" "$d" "$d" "$d" "$d" "$d" "$d" >> "$out"
+        fi
         ;;
     assetfinder)
         d="${!#}"
@@ -55,15 +60,43 @@ case "$name" in
         ;;
     amass)
         d=$(flagval -d "$@") || exit 1
-        out=$(flagval -o "$@") || out="/dev/stdout"
-        printf 'vpn.%s\nlegacy.%s\n' "$d" "$d" > "$out"
+        case "${1:-}" in
+            enum)
+                if flagval -o "$@" >/dev/null; then printf 'flag provided but not defined: -o\n' >&2; exit 1; fi
+                [ "${FAKE_AMASS_FAIL:-0}" = 1 ] && { printf 'engine unavailable\n' >&2; exit 42; }
+                printf 'Session Scope\nFQDN:\n%s\n' "$d"
+                ;;
+            subs)
+                [ "${FAKE_AMASS_EXPORT_FAIL:-0}" = 1 ] && { printf 'database unavailable\n' >&2; exit 42; }
+                printf 'vpn.%s\nlegacy.%s\n' "$d" "$d"
+                ;;
+            *) exit 1 ;;
+        esac
         ;;
+    findomain)
+        d=$(flagval -t "$@") || exit 1
+        printf 'api.%s\n' "$d"
+        ;;
+    curl)
+        out=$(flagval -o "$@") || out=/dev/stdout
+        case "${!#}" in
+            *crt.sh*) printf '[{"name_value":"api.example.com"}]\n' > "$out" ;;
+            *web.archive.org*) printf 'https://www.example.com/index.html\n' > "$out" ;;
+            *) printf 'www\napi\n' > "$out" ;;
+        esac
+        ;;
+    gau)
+        while IFS= read -r d; do printf 'https://archive.%s/item\n' "$d"; done
+        ;;
+    tlsx|dig) exit 0 ;;
     waybackurls)
         while IFS= read -r d; do
             [ -n "$d" ] || continue
             printf 'https://www.%s/index.html\nhttps://cdn.%s/app.js\nhttp://user@old.%s:8080/x?y=1\n' \
                 "$d" "$d" "$d"
+            [ "${FAKE_EXTRA_NAMES:-0}" = 1 ] && printf 'https://customer.mx.saas.%s/reintroduced\n' "$d"
         done
+        [ "${FAKE_WAYBACK_TIMEOUT:-0}" = 1 ] && exit 124
         ;;
     puredns)
         sub="${1:-}"; shift || true
@@ -73,7 +106,8 @@ case "$name" in
                 inp=$(firstpos "$@") || inp=""
                 # Resolve everything except names containing "nx".
                 if [ -n "$inp" ] && [ -f "$inp" ]; then
-                    grep -v 'nx' "$inp" | sort -u > "$w"
+                    if [ "${FAKE_DNS_DROP:-0}" = 1 ]; then grep -vE 'nx|bulk-miss|aaaa-only|_' "$inp" | sort -u > "$w"
+                    else grep -v 'nx' "$inp" | sort -u > "$w"; fi
                 else
                     : > "$w"
                 fi
@@ -152,6 +186,18 @@ case "$name" in
             base="${host#*.}"
             printf '%s/login\n%s/api/v1/users\nhttps://hidden.%s/secret\n' "$u" "$u" "$base"
         done < "$l" > "$out"
+        if [ -n "${FAKE_KATANA_STATE_FILE:-}" ]; then
+            calls=0; [ -f "$FAKE_KATANA_STATE_FILE" ] && calls=$(cat "$FAKE_KATANA_STATE_FILE")
+            calls=$((calls+1)); printf '%s\n' "$calls" > "$FAKE_KATANA_STATE_FILE"
+            [ "$calls" = "${FAKE_KATANA_TIMEOUT_CALL:-0}" ] && exit 124
+            [ "$calls" = "${FAKE_KATANA_DELAY_CALL:-0}" ] && sleep 1
+        fi
+        ;;
+    dnsx)
+        l=$(flagval -l "$@") || exit 1
+        out=$(flagval -o "$@") || out=/dev/stdout
+        [ "${FAKE_DNSX_FAIL:-0}" = 1 ] && { printf 'resolver unavailable\n' >&2; exit 42; }
+        grep -v 'nx' "$l" | sort -u > "$out"
         ;;
     nuclei)
         # -update-templates is a no-op here.

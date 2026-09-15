@@ -15,7 +15,7 @@
 # Options (also settable as environment variables):
 #   --prefix DIR     install root                 (LEETENUM_PREFIX)
 #   --bin DIR        directory for the symlink    (LEETENUM_BIN)
-#   --ref REF        branch, tag or commit        (LEETENUM_REF, default v1.0.0)
+#   --ref REF        branch, tag or commit        (LEETENUM_REF, default v1.1.0)
 #   --tarball FILE   install from a local .tar.gz instead of downloading,
 #                    for air-gapped hosts        (LEETENUM_TARBALL)
 #   --no-tools       skip the recon toolchain
@@ -25,7 +25,7 @@ set -eu
 REPO="theleetsec/LeetSec-Tools"
 # ghcr rejects uppercase in image paths, so this cannot be derived from $REPO.
 IMAGE="ghcr.io/theleetsec/leetenum"
-REF="${LEETENUM_REF:-v1.0.0}"
+REF="${LEETENUM_REF:-v1.1.0}"
 PREFIX="${LEETENUM_PREFIX:-}"
 BINDIR="${LEETENUM_BIN:-}"
 LOCAL_TARBALL="${LEETENUM_TARBALL:-}"
@@ -238,7 +238,7 @@ fi
 # Verify we got LeetEnum and not an error page rendered as HTML, which is what a
 # bad ref returns and what silently installed a 9-byte "Not Found" before.
 NEW="${SRC}/repo"
-for f in leetenum.sh lib/compat.sh lib/ui.sh lib/config.sh lib/deps.sh lib/pipeline.sh; do
+for f in leetenum.sh lib/compat.sh lib/ui.sh lib/config.sh lib/deps.sh lib/pipeline.sh lib/hardening.sh; do
     [ -s "${NEW}/${f}" ] || die "download is incomplete: ${f} missing. Wrong --ref?"
 done
 head -n 1 "${NEW}/leetenum.sh" | grep -q '^#!' \

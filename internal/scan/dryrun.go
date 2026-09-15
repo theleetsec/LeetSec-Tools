@@ -41,6 +41,7 @@ func (p *Pipeline) dryPlan(ctx context.Context) error {
 		}
 		if ph.id == "p7" {
 			p.con.Info("waybackurls and gau receive the target domain on standard input.")
+			p.con.Info("Katana uses completed-seed checkpoints, batches of at most 100, and a size-dependent budget (45m to 6h); --crawl-budget overrides it.")
 		}
 		for _, argv := range p.plannedCommands(ph.id) {
 			p.con.Info("$ " + formatCommand(argv))
@@ -57,7 +58,7 @@ func (p *Pipeline) plannedCommands(id string) [][]string {
 		cmd := []string{"puredns", "resolve", in, "-r", p.wl.Resolvers, "-w", out,
 			"--rate-limit", itoa(p.prof.DNSRate)}
 		if candidateList {
-			cmd = append(cmd, "--skip-wildcard-filter", "--skip-validation")
+			cmd = append(cmd, "--skip-wildcard-filter", "--skip-validation", "--skip-sanitize")
 		}
 		return cmd
 	}
@@ -70,10 +71,12 @@ func (p *Pipeline) plannedCommands(id string) [][]string {
 		return [][]string{
 			{"subfinder", "-d", target, "-all", "-silent", "-o", tmp("subfinder.txt")},
 			{"assetfinder", "--subs-only", target},
-			{"amass", "enum", "-passive", "-d", target, "-o", tmp("amass.txt")},
+			{"amass", "enum", "-passive", "-d", target, "-nocolor"},
+			{"amass", "subs", "-names", "-d", target, "-nocolor"},
 			{"findomain", "-t", target, "-q"},
 			{"dig", "@<nameserver>", target, "AXFR", "+time=5", "+tries=1"},
 			resolve(tmp("passive_candidates.txt"), tmp("passive_resolved.txt"), true),
+			{"dnsx", "-l", p.L.Path("01_unresolved.txt"), "-a", "-aaaa", "-silent", "-no-color", "-disable-update-check", "-threads", "100", "-rate-limit", itoa(minInt(p.prof.DNSRate, 500)), "-retry", "3", "-o", tmp("passive_recovered.txt")},
 		}
 	case "p2":
 		return [][]string{brute(p.wl.Brute, target, tmp("brute.txt"), p.prof.DNSRate)}
@@ -112,6 +115,7 @@ func (p *Pipeline) plannedCommands(id string) [][]string {
 			{"waybackurls"},
 			{"gau", "--subs", "--threads", "5"},
 			resolve(tmp("crawled_candidates.txt"), tmp("crawled_resolved.txt"), true),
+			{"dnsx", "-l", p.L.Path("07_unresolved.txt"), "-a", "-aaaa", "-silent", "-no-color", "-disable-update-check", "-threads", "100", "-rate-limit", itoa(minInt(p.prof.DNSRate, 500)), "-retry", "3", "-o", tmp("crawled_recovered.txt")},
 			brute(tmp("deep_words.txt"), "<parent>", tmp("deep/<parent>.txt"), p.prof.DNSRatePerWorker()),
 		}
 	case "p8":

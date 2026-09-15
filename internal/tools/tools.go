@@ -46,7 +46,7 @@ var GoTools = []Tool{
 	{"waybackurls", "github.com/tomnomnom/waybackurls", "v0.1.0", "archive mining", false},
 	{"gau", "github.com/lc/gau/v2/cmd/gau", "v2.2.4", "URL archive mining", false},
 	{"tlsx", "github.com/projectdiscovery/tlsx/cmd/tlsx", "v1.1.9", "TLS SAN/CN names", false},
-	{"dnsx", "github.com/projectdiscovery/dnsx/cmd/dnsx", "v1.2.1", "DNS record probing", false},
+	{"dnsx", "github.com/projectdiscovery/dnsx/cmd/dnsx", "v1.2.1", "candidate DNS recovery", true},
 }
 
 // Helpers are not Go programs and cannot be installed the same way. massdns is
